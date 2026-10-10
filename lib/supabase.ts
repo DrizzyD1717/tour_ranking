@@ -69,22 +69,19 @@ let client: SupabaseClient | null = null;
 
 export function getSupabase(): SupabaseClient {
   if (!url || !key) {
-    throw new Error(
-      "Missing NEXT_PUBLIC_SUPABASE_URL or NEXT_PUBLIC_SUPABASE_ANON_KEY in .env.local",
-    );
+    throw new Error("Missing NEXT_PUBLIC_SUPABASE_URL or NEXT_PUBLIC_SUPABASE_ANON_KEY in .env.local");
   }
-  return (client ??= createClient(url, key, {
-    auth: { persistSession: false },
-  }));
+  // In the browser the session is kept in storage so people stay signed in. On the server there is no
+  // session (public pages read as an anonymous visitor), so nothing is persisted or refreshed there.
+  const inBrowser = typeof window !== "undefined";
+  return (client ??= createClient(url, key, { auth: { persistSession: inBrowser, autoRefreshToken: inBrowser } }));
 }
 
 // ---------------------------------------------------------------------------
 // Queries
 // ---------------------------------------------------------------------------
 
-export async function getTournamentBundle(
-  slug: string,
-): Promise<TournamentBundle | null> {
+export async function getTournamentBundle(slug: string): Promise<TournamentBundle | null> {
   const sb = getSupabase();
 
   const { data: tournament, error } = await sb
@@ -99,27 +96,17 @@ export async function getTournamentBundle(
   if (!tournament) return null;
 
   const [participants, matches] = await Promise.all([
-    sb
-      .from("participants")
-      .select("id, tournament_id, name, group_label, seed")
-      .eq("tournament_id", tournament.id)
-      .order("seed", { nullsFirst: false }),
+    sb.from("participants").select("id, tournament_id, name, group_label, seed").eq("tournament_id", tournament.id).order("seed", { nullsFirst: false }),
     sb
       .from("matches")
-      .select(
-        "id, tournament_id, round, group_label, home_id, away_id, home_score, away_score, status, scheduled_at",
-      )
+      .select("id, tournament_id, round, group_label, home_id, away_id, home_score, away_score, status, scheduled_at")
       .eq("tournament_id", tournament.id)
       .order("round")
       .order("scheduled_at", { nullsFirst: false }),
   ]);
 
-  if (participants.error)
-    throw new Error(
-      `Could not load participants: ${participants.error.message}`,
-    );
-  if (matches.error)
-    throw new Error(`Could not load matches: ${matches.error.message}`);
+  if (participants.error) throw new Error(`Could not load participants: ${participants.error.message}`);
+  if (matches.error) throw new Error(`Could not load matches: ${matches.error.message}`);
 
   return {
     tournament: tournament as unknown as Tournament,

@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Barlow_Condensed, Instrument_Sans } from "next/font/google";
+import SiteHeader from "./components/SiteHeader";
 import "./globals.css";
 
 const barlow = Barlow_Condensed({
@@ -21,7 +22,10 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en" className={`${barlow.variable} ${instrument.variable}`}>
-      <body className="min-h-dvh">{children}</body>
+      <body className="min-h-dvh">
+        <SiteHeader />
+        {children}
+      </body>
     </html>
   );
 }
