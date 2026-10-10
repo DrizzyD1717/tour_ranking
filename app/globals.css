@@ -1,0 +1,216 @@
+@import "tailwindcss";
+
+/* ==========================================================================
+   FLOODLIGHT — night-match arena palette (Tailwind v4)
+   Concept: a stadium after dark. Deep ink surfaces, pitch-lime as the
+   "scoreboard" accent, ember for heat/live moments, volt violet for esports.
+   Hex values are used on purpose so Framer Motion can animate them directly.
+   ========================================================================== */
+
+/* ---------- 1. Raw scales (use as bg-ink-900, text-lime-400, etc.) ---------- */
+@theme {
+  /* Ink: blue-black neutrals with a faint violet cast */
+  --color-ink-50:  #f2f4fb;
+  --color-ink-100: #e1e5f2;
+  --color-ink-200: #c3cadf;
+  --color-ink-300: #9aa3c0;
+  --color-ink-400: #727c9e;
+  --color-ink-500: #525b7c;
+  --color-ink-600: #3a4260;
+  --color-ink-700: #272d47;
+  --color-ink-800: #1a1f35;
+  --color-ink-900: #11152a;
+  --color-ink-950: #0a0d1c;
+
+  /* Pitch lime: primary accent, scoreboard glow, "winning" */
+  --color-lime-300: #dcff7a;
+  --color-lime-400: #c6ff3d;
+  --color-lime-500: #a8e61a;
+  --color-lime-600: #82b80f;
+
+  /* Ember: heat, live matches, calls to action */
+  --color-ember-300: #ff9a7d;
+  --color-ember-400: #ff7a52;
+  --color-ember-500: #ff5a36;
+  --color-ember-600: #e03a18;
+
+  /* Volt: esports (FIFA, COD, etc.) */
+  --color-volt-300: #b5a3ff;
+  --color-volt-400: #9a85ff;
+  --color-volt-500: #7c5cff;
+  --color-volt-600: #6240e6;
+
+  /* Aqua: secondary highlight, links, info */
+  --color-aqua-400: #3de0e0;
+  --color-aqua-500: #19c3c8;
+
+  /* Podium */
+  --color-gold:   #ffc83d;
+  --color-silver: #cfd6e6;
+  --color-bronze: #d98a54;
+
+  /* Fonts: loaded in app/layout.tsx via next/font, which defines --font-barlow and --font-instrument.
+     Barlow Condensed is the scoreboard voice (headings and every number); Instrument Sans is body text. */
+  --font-display: var(--font-barlow), "Arial Narrow", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: var(--font-instrument), ui-sans-serif, system-ui, sans-serif;
+
+  /* Glows (use as shadow-glow-lime etc.) */
+  --shadow-glow-lime:  0 0 0 1px rgb(198 255 61 / 0.35), 0 0 32px -4px rgb(198 255 61 / 0.45);
+  --shadow-glow-ember: 0 0 0 1px rgb(255 90 54 / 0.35),  0 0 32px -4px rgb(255 90 54 / 0.45);
+  --shadow-glow-volt:  0 0 0 1px rgb(124 92 255 / 0.35), 0 0 32px -4px rgb(124 92 255 / 0.5);
+  --shadow-card: 0 1px 0 rgb(255 255 255 / 0.04) inset, 0 12px 32px -12px rgb(0 0 0 / 0.6);
+
+  /* CSS-only keyframes for tiny always-on effects (everything else: Framer Motion) */
+  --animate-live-pulse: live-pulse 1.6s ease-out infinite;
+  --animate-shimmer: shimmer 2.4s linear infinite;
+
+  @keyframes live-pulse {
+    0%   { box-shadow: 0 0 0 0 rgb(255 90 54 / 0.7); }
+    100% { box-shadow: 0 0 0 10px rgb(255 90 54 / 0); }
+  }
+  @keyframes shimmer {
+    to { background-position: 200% 0; }
+  }
+}
+
+/* ---------- 2. Semantic tokens (dark is the default theme) ---------- */
+:root {
+  --background:        #0a0d1c; /* ink-950 */
+  --surface:           #11152a; /* ink-900: cards */
+  --surface-raised:    #1a1f35; /* ink-800: hover, modals */
+  --surface-sunken:    #070914; /* inputs, table stripes */
+  --border:            #272d47; /* ink-700 */
+  --border-strong:     #3a4260; /* ink-600 */
+
+  --foreground:        #f2f4fb; /* ink-50 */
+  --foreground-muted:  #9aa3c0; /* ink-300 */
+  --foreground-subtle: #727c9e; /* ink-400 */
+
+  --primary:           #c6ff3d; /* lime-400 */
+  --primary-foreground:#0a0d1c;
+  --accent:            #ff5a36; /* ember-500 */
+  --accent-foreground: #ffffff;
+  --esports:           #7c5cff; /* volt-500 */
+  --sports:            #c6ff3d; /* physical sports tag */
+
+  /* Match + result states */
+  --live:              #ff5a36;
+  --win:               #4ade80;
+  --draw:              #ffc83d;
+  --loss:              #ff5a6e;
+
+  --ring:              #c6ff3d;
+  --selection:         rgb(198 255 61 / 0.25);
+}
+
+/* Optional light theme: set <html data-theme="light"> */
+[data-theme="light"] {
+  --background:        #f6f7fc;
+  --surface:           #ffffff;
+  --surface-raised:    #eef0f9;
+  --surface-sunken:    #e7eaf5;
+  --border:            #d5daec;
+  --border-strong:     #b3bbd6;
+
+  --foreground:        #0a0d1c;
+  --foreground-muted:  #525b7c;
+  --foreground-subtle: #727c9e;
+
+  --primary:           #0a0d1c; /* lime fails contrast on white, so ink becomes primary */
+  --primary-foreground:#c6ff3d;
+  --accent:            #e03a18;
+  --accent-foreground: #ffffff;
+  --esports:           #6240e6;
+  --sports:            #82b80f;
+
+  --live:              #e03a18;
+  --win:               #16a34a;
+  --draw:              #c98f00;
+  --loss:              #dc2646;
+
+  --ring:              #6240e6;
+  --selection:         rgb(98 64 230 / 0.2);
+}
+
+/* ---------- 3. Expose semantic tokens as Tailwind utilities ---------- */
+@theme inline {
+  --color-background:        var(--background);
+  --color-surface:           var(--surface);
+  --color-surface-raised:    var(--surface-raised);
+  --color-surface-sunken:    var(--surface-sunken);
+  --color-border:            var(--border);
+  --color-border-strong:     var(--border-strong);
+  --color-foreground:        var(--foreground);
+  --color-muted:             var(--foreground-muted);
+  --color-subtle:            var(--foreground-subtle);
+  --color-primary:           var(--primary);
+  --color-primary-foreground:var(--primary-foreground);
+  --color-accent:            var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-esports:           var(--esports);
+  --color-sports:            var(--sports);
+  --color-live:              var(--live);
+  --color-win:               var(--win);
+  --color-draw:              var(--draw);
+  --color-loss:              var(--loss);
+  --color-ring:              var(--ring);
+}
+
+/* ---------- 4. Base ---------- */
+@layer base {
+  html { color-scheme: dark; }
+  [data-theme="light"] { color-scheme: light; }
+
+  body {
+    background: var(--background);
+    color: var(--foreground);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  ::selection { background: var(--selection); }
+
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}
+
+/* ---------- 5. Reusable atmosphere ---------- */
+@layer utilities {
+  /* Floodlight wash behind hero sections */
+  .bg-floodlight {
+    background:
+      radial-gradient(60% 50% at 50% -10%, rgb(198 255 61 / 0.14), transparent 70%),
+      radial-gradient(40% 40% at 90% 10%, rgb(124 92 255 / 0.16), transparent 70%),
+      var(--background);
+  }
+  /* Subtle pitch-line grid */
+  .bg-pitch-grid {
+    background-image:
+      linear-gradient(to right, rgb(255 255 255 / 0.035) 1px, transparent 1px),
+      linear-gradient(to bottom, rgb(255 255 255 / 0.035) 1px, transparent 1px);
+    background-size: 48px 48px;
+  }
+  /* Gradient text for rank numbers and headings */
+  .text-gradient-lime {
+    background: linear-gradient(120deg, #dcff7a, #82b80f);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  /* Skeleton loading shimmer */
+  .skeleton {
+    background: linear-gradient(90deg, var(--surface) 25%, var(--surface-raised) 50%, var(--surface) 75%);
+    background-size: 200% 100%;
+    animation: var(--animate-shimmer);
+  }
+}
