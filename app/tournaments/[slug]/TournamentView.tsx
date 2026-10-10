@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, MotionConfig, animate, motion, useMotionValue, useTransform } from "framer-motion";
 import { computeStandings, type GameRules, type MatchResult, type StandingRow } from "@/lib/tournament";
 import { getSupabase, hasSupabase, type MatchRow, type ParticipantRow, type TournamentBundle } from "@/lib/supabase";
+import { useUser } from "@/lib/use-user";
 
 // ---------------------------------------------------------------------------
 // Small helpers
@@ -176,14 +177,78 @@ function StandingsTable({
 // Fixtures
 // ---------------------------------------------------------------------------
 
+type ScorePatch = Partial<Pick<MatchRow, "status" | "home_score" | "away_score">>;
+/** Saves a change to one match. Resolves to an error message, or null when it worked. */
+type SaveMatch = (id: string, patch: ScorePatch) => Promise<string | null>;
+
+const MAX_SCORE = 99;
+const SMALL_BTN =
+  "cursor-pointer rounded-full border border-border-strong px-4 py-2 text-sm font-medium transition hover:border-foreground disabled:cursor-not-allowed disabled:opacity-40";
+const PRIMARY_BTN =
+  "cursor-pointer rounded-full bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground transition hover:shadow-glow-lime disabled:cursor-not-allowed disabled:opacity-40 disabled:shadow-none";
+const ROUND_BTN =
+  "grid cursor-pointer place-items-center rounded-full border border-border-strong transition hover:border-foreground disabled:cursor-not-allowed disabled:opacity-40";
+
+const clampScore = (n: number) => Math.min(MAX_SCORE, Math.max(0, n));
+
+function Stepper({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: number;
+  onChange: (n: number) => void;
+}) {
+  return (
+    <div className="flex items-center gap-2">
+      <button
+        type="button"
+        aria-label={`Remove one from ${label}`}
+        disabled={value <= 0}
+        onClick={() => onChange(clampScore(value - 1))}
+        className={`${ROUND_BTN} size-11 text-xl`}
+      >
+        −
+      </button>
+      <input
+        type="number"
+        inputMode="numeric"
+        min={0}
+        max={MAX_SCORE}
+        aria-label={`${label} score`}
+        value={value}
+        onChange={(e) => {
+          const n = Number.parseInt(e.target.value, 10);
+          onChange(Number.isNaN(n) ? 0 : clampScore(n));
+        }}
+        className="w-16 rounded-xl border border-border bg-surface-sunken py-2 text-center font-display text-3xl font-bold tabular-nums outline-none focus:border-primary"
+      />
+      <button
+        type="button"
+        aria-label={`Add one to ${label}`}
+        disabled={value >= MAX_SCORE}
+        onClick={() => onChange(clampScore(value + 1))}
+        className={`${ROUND_BTN} size-11 text-xl`}
+      >
+        +
+      </button>
+    </div>
+  );
+}
+
 function MatchCard({
   match,
   nameOf,
   showTime,
+  canScore,
+  onSave,
 }: {
   match: MatchRow;
   nameOf: (id: string | null) => string;
   showTime: boolean;
+  canScore: boolean;
+  onSave: SaveMatch;
 }) {
   const home = nameOf(match.home_id);
   const away = nameOf(match.away_id);
@@ -193,53 +258,167 @@ function MatchCard({
   const hs = match.home_score ?? 0;
   const as = match.away_score ?? 0;
   const dim = (mine: number, theirs: number) => (finished && mine < theirs ? "text-subtle" : "text-foreground");
+  const bothTeams = match.home_id !== null && match.away_id !== null;
+
+  const [editing, setEditing] = useState(false);
+  const [draftHome, setDraftHome] = useState(0);
+  const [draftAway, setDraftAway] = useState(0);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function run(patch: ScorePatch) {
+    setBusy(true);
+    setError(null);
+    const problem = await onSave(match.id, patch);
+    setBusy(false);
+    if (problem) setError(problem);
+    return problem === null;
+  }
+
+  const bump = (side: "home_score" | "away_score", delta: number) =>
+    run({ [side]: clampScore((match[side] ?? 0) + delta) });
+
+  function openEditor() {
+    setDraftHome(match.home_score ?? 0);
+    setDraftAway(match.away_score ?? 0);
+    setError(null);
+    setEditing(true);
+  }
+
+  async function saveDraft(status: "live" | "finished") {
+    if (await run({ status, home_score: draftHome, away_score: draftAway })) setEditing(false);
+  }
+
+  async function clearResult() {
+    if (await run({ status: "scheduled", home_score: null, away_score: null })) setEditing(false);
+  }
+
+  const controls = canScore && bothTeams && !editing;
 
   return (
     <motion.li
       layout="position"
-      className={`grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-3 rounded-2xl border bg-surface px-3 py-4 sm:gap-5 sm:px-5 ${
+      className={`flex flex-col gap-4 rounded-2xl border bg-surface px-3 py-4 sm:px-5 ${
         live ? "border-live/40 shadow-glow-ember" : "border-border"
       }`}
     >
-      <span className="flex min-w-0 items-center justify-end gap-3 text-right">
-        <span className={`truncate font-medium ${finished && hs < as ? "text-muted" : ""}`}>{home}</span>
-        <Crest name={home} size="sm" />
-      </span>
+      <div className="grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-3 sm:gap-5">
+        <span className="flex min-w-0 items-center justify-end gap-3 text-right">
+          <span className={`truncate font-medium ${finished && hs < as ? "text-muted" : ""}`}>{home}</span>
+          <Crest name={home} size="sm" />
+        </span>
 
-      <span className="flex min-w-[5.5rem] flex-col items-center">
-        {hasScore ? (
-          <span className="flex items-baseline gap-2 font-display text-4xl font-bold leading-none tabular-nums">
-            <span className={dim(hs, as)}>{hs}</span>
-            <span className="text-xl text-subtle">-</span>
-            <span className={dim(as, hs)}>{as}</span>
-          </span>
+        <span className="flex min-w-[5.5rem] flex-col items-center">
+          {hasScore ? (
+            <span className="flex items-baseline gap-2 font-display text-4xl font-bold leading-none tabular-nums">
+              <span className={dim(hs, as)}>{hs}</span>
+              <span className="text-xl text-subtle">-</span>
+              <span className={dim(as, hs)}>{as}</span>
+            </span>
+          ) : (
+            <span className="font-display text-xl text-subtle">vs</span>
+          )}
+          {live ? (
+            <span className="mt-1.5 flex items-center gap-1.5 text-xs font-semibold text-live">
+              <LiveDot />
+              Live
+            </span>
+          ) : finished ? (
+            <span className="mt-1.5 text-xs text-subtle">Full time</span>
+          ) : showTime && match.scheduled_at ? (
+            <span className="mt-1 text-center text-xs text-subtle">
+              {new Date(match.scheduled_at).toLocaleString(undefined, {
+                weekday: "short",
+                day: "numeric",
+                month: "short",
+                hour: "2-digit",
+                minute: "2-digit",
+              })}
+            </span>
+          ) : null}
+        </span>
+
+        <span className="flex min-w-0 items-center gap-3">
+          <Crest name={away} size="sm" />
+          <span className={`truncate font-medium ${finished && as < hs ? "text-muted" : ""}`}>{away}</span>
+        </span>
+      </div>
+
+      {controls &&
+        (live ? (
+          // Live: tap to add or remove a point, each tap saves straight away.
+          <div className="grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-3 sm:gap-5">
+            <span className="flex justify-end gap-2">
+              <button type="button" aria-label={`Remove one from ${home}`} disabled={busy || hs <= 0} onClick={() => bump("home_score", -1)} className={`${ROUND_BTN} size-10 text-lg`}>
+                −
+              </button>
+              <button type="button" aria-label={`Add one to ${home}`} disabled={busy || hs >= MAX_SCORE} onClick={() => bump("home_score", 1)} className={`${ROUND_BTN} size-10 text-lg`}>
+                +
+              </button>
+            </span>
+            <button type="button" disabled={busy} onClick={() => run({ status: "finished" })} className={`${PRIMARY_BTN} min-w-[5.5rem]`}>
+              Full time
+            </button>
+            <span className="flex gap-2">
+              <button type="button" aria-label={`Remove one from ${away}`} disabled={busy || as <= 0} onClick={() => bump("away_score", -1)} className={`${ROUND_BTN} size-10 text-lg`}>
+                −
+              </button>
+              <button type="button" aria-label={`Add one to ${away}`} disabled={busy || as >= MAX_SCORE} onClick={() => bump("away_score", 1)} className={`${ROUND_BTN} size-10 text-lg`}>
+                +
+              </button>
+            </span>
+          </div>
         ) : (
-          <span className="font-display text-xl text-subtle">vs</span>
-        )}
-        {live ? (
-          <span className="mt-1.5 flex items-center gap-1.5 text-xs font-semibold text-live">
-            <LiveDot />
-            Live
-          </span>
-        ) : finished ? (
-          <span className="mt-1.5 text-xs text-subtle">Full time</span>
-        ) : showTime && match.scheduled_at ? (
-          <span className="mt-1 text-center text-xs text-subtle">
-            {new Date(match.scheduled_at).toLocaleString(undefined, {
-              weekday: "short",
-              day: "numeric",
-              month: "short",
-              hour: "2-digit",
-              minute: "2-digit",
-            })}
-          </span>
-        ) : null}
-      </span>
+          <div className="flex flex-wrap justify-center gap-2">
+            {!finished && (
+              <button type="button" disabled={busy} onClick={() => run({ status: "live", home_score: 0, away_score: 0 })} className={SMALL_BTN}>
+                Start match
+              </button>
+            )}
+            <button type="button" disabled={busy} onClick={openEditor} className={SMALL_BTN}>
+              {finished ? "Edit result" : "Enter result"}
+            </button>
+          </div>
+        ))}
 
-      <span className="flex min-w-0 items-center gap-3">
-        <Crest name={away} size="sm" />
-        <span className={`truncate font-medium ${finished && as < hs ? "text-muted" : ""}`}>{away}</span>
-      </span>
+      {canScore && editing && (
+        <div className="border-t border-border pt-4">
+          <div className="grid grid-cols-2 gap-4">
+            <div className="flex min-w-0 flex-col items-center gap-2">
+              <span className="max-w-full truncate text-sm text-muted">{home}</span>
+              <Stepper label={home} value={draftHome} onChange={setDraftHome} />
+            </div>
+            <div className="flex min-w-0 flex-col items-center gap-2">
+              <span className="max-w-full truncate text-sm text-muted">{away}</span>
+              <Stepper label={away} value={draftAway} onChange={setDraftAway} />
+            </div>
+          </div>
+          <div className="mt-4 flex flex-wrap justify-center gap-2">
+            <button type="button" disabled={busy} onClick={() => saveDraft("finished")} className={PRIMARY_BTN}>
+              Save as full time
+            </button>
+            {!finished && (
+              <button type="button" disabled={busy} onClick={() => saveDraft("live")} className={SMALL_BTN}>
+                Save as live
+              </button>
+            )}
+            {(live || finished) && (
+              <button type="button" disabled={busy} onClick={clearResult} className={SMALL_BTN}>
+                Clear result
+              </button>
+            )}
+            <button type="button" disabled={busy} onClick={() => setEditing(false)} className={SMALL_BTN}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {error && (
+        <p role="alert" className="text-center text-sm text-loss">
+          {error}
+        </p>
+      )}
     </motion.li>
   );
 }
@@ -250,12 +429,16 @@ function Fixtures({
   nameOf,
   scoreLabel,
   showTime,
+  canScore,
+  onSave,
 }: {
   matches: MatchRow[];
   participants: ParticipantRow[];
   nameOf: (id: string | null) => string;
   scoreLabel: string;
   showTime: boolean;
+  canScore: boolean;
+  onSave: SaveMatch;
 }) {
   const rounds = useMemo(() => [...new Set(matches.map((m) => m.round))].sort((a, b) => a - b), [matches]);
 
@@ -309,7 +492,7 @@ function Fixtures({
 
       <ul className="space-y-3" aria-label={`Round ${round} matches`}>
         {inRound.map((m) => (
-          <MatchCard key={m.id} match={m} nameOf={nameOf} showTime={showTime} />
+          <MatchCard key={m.id} match={m} nameOf={nameOf} showTime={showTime} canScore={canScore} onSave={onSave} />
         ))}
       </ul>
 
@@ -370,6 +553,59 @@ export default function TournamentView({ initial, demo }: { initial: TournamentB
       sb.removeChannel(channel);
     };
   }, [demo, tournament.id]);
+
+  // Who is signed in, and may they enter scores here? The database enforces this too; this only decides
+  // whether to show the controls.
+  const { user } = useUser();
+  const userId = user?.id;
+  const [roleResult, setRoleResult] = useState<{ key: string; role: "owner" | "scorekeeper" | null } | null>(null);
+  const roleKey = userId ? `${userId}:${tournament.id}` : "";
+
+  useEffect(() => {
+    if (demo || !hasSupabase || !userId) return;
+    let active = true;
+    getSupabase()
+      .from("tournament_admins")
+      .select("role")
+      .eq("tournament_id", tournament.id)
+      .eq("user_id", userId)
+      .maybeSingle()
+      .then(({ data }) => {
+        if (!active) return;
+        const role = (data?.role as "owner" | "scorekeeper" | undefined) ?? null;
+        setRoleResult({ key: `${userId}:${tournament.id}`, role });
+      });
+    return () => {
+      active = false;
+    };
+  }, [demo, userId, tournament.id]);
+
+  const role = roleResult && roleResult.key === roleKey ? roleResult.role : null;
+  const canScore = demo || role !== null;
+
+  async function saveMatch(id: string, patch: ScorePatch): Promise<string | null> {
+    const current = matches.find((m) => m.id === id);
+    if (!current) return "This match is no longer part of the tournament. Reload the page.";
+    const next = { ...current, ...patch };
+
+    if (next.status === "finished") {
+      if (next.home_score === null || next.away_score === null) return "Enter both scores first.";
+      if (!game.allows_draws && next.home_score === next.away_score) {
+        return `${game.name} has no draws, so one side has to be ahead before full time.`;
+      }
+    }
+
+    if (!demo) {
+      const { data, error } = await getSupabase().from("matches").update(patch).eq("id", id).select("id");
+      if (error) return error.message;
+      // A blocked update is not an error in Postgres, it just changes nothing.
+      if (!data || data.length === 0) {
+        return "You can't change scores in this tournament. Sign in as the organizer and try again.";
+      }
+    }
+    setMatches((ms) => ms.map((m) => (m.id === id ? { ...m, ...patch } : m)));
+    return null;
+  }
 
   const nameById = useMemo(() => new Map(participants.map((p) => [p.id, p.name])), [participants]);
   const nameOf = (id: string | null) => (id ? (nameById.get(id) ?? "Unknown") : "To be decided");
@@ -483,7 +719,7 @@ export default function TournamentView({ initial, demo }: { initial: TournamentB
       <main className="mx-auto max-w-5xl px-4 py-8 sm:px-6">
         {demo && (
           <div className="mb-6 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-dashed border-border-strong px-4 py-3 text-sm text-muted">
-            <span>This is demo data. Play a match and watch the table move.</span>
+            <span>This is demo data. Score a match yourself in the Fixtures tab, or press Play next match.</span>
             <button
               onClick={playNextMatch}
               disabled={nothingLeft}
@@ -492,6 +728,13 @@ export default function TournamentView({ initial, demo }: { initial: TournamentB
               {nothingLeft ? "All matches played" : "Play next match"}
             </button>
           </div>
+        )}
+
+        {!demo && role && (
+          <p className="mb-6 rounded-2xl border border-border bg-surface px-4 py-3 text-sm text-muted">
+            You are {role === "owner" ? "the organizer" : "a scorekeeper"} of this tournament. Open the Fixtures tab to
+            enter scores. Everyone watching sees each change as you save it.
+          </p>
         )}
 
         <div role="tablist" aria-label="Tournament views" className="mb-6 flex gap-1 border-b border-border">
@@ -562,6 +805,8 @@ export default function TournamentView({ initial, demo }: { initial: TournamentB
                 nameOf={nameOf}
                 scoreLabel={game.score_label}
                 showTime={mounted}
+                canScore={canScore}
+                onSave={saveMatch}
               />
             )}
           </motion.div>
