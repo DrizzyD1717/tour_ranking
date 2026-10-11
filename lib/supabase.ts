@@ -114,3 +114,73 @@ export async function getTournamentBundle(slug: string): Promise<TournamentBundl
     matches: (matches.data ?? []) as MatchRow[],
   };
 }
+
+// ---------------------------------------------------------------------------
+// Home page list
+// ---------------------------------------------------------------------------
+
+export interface TournamentSummary {
+  id: string;
+  slug: string;
+  name: string;
+  status: Tournament["status"];
+  format: Tournament["format"];
+  createdAt: string;
+  game: { name: string; slug: string; category: Game["category"] };
+  /** Teams or players entered. */
+  entrants: number;
+  played: number;
+  total: number;
+}
+
+interface SummaryRow {
+  id: string;
+  slug: string;
+  name: string;
+  status: Tournament["status"];
+  format: Tournament["format"];
+  created_at: string;
+  game: { name: string; slug: string; category: Game["category"] } | null;
+  participants: { count: number }[] | null;
+  matches: { status: MatchRow["status"] }[] | null;
+}
+
+/** Turns the raw database rows into what the home page shows. Live tournaments come first, then newest. */
+export function summarizeTournaments(rows: SummaryRow[]): TournamentSummary[] {
+  return rows
+    .filter((r) => r.game)
+    .map((r) => {
+      const matches = r.matches ?? [];
+      return {
+        id: r.id,
+        slug: r.slug,
+        name: r.name,
+        status: r.status,
+        format: r.format,
+        createdAt: r.created_at,
+        game: r.game as TournamentSummary["game"],
+        entrants: r.participants?.[0]?.count ?? 0,
+        played: matches.filter((m) => m.status === "finished").length,
+        total: matches.length,
+      };
+    })
+    .sort((a, b) => {
+      const live = Number(b.status === "live") - Number(a.status === "live");
+      return live !== 0 ? live : b.createdAt.localeCompare(a.createdAt);
+    });
+}
+
+/** Public tournaments only. Link-only and private ones are never listed. */
+export async function listPublicTournaments(limit = 30): Promise<TournamentSummary[]> {
+  const { data, error } = await getSupabase()
+    .from("tournaments")
+    .select(
+      "id, slug, name, status, format, created_at, game:games(name, slug, category), participants(count), matches(status)",
+    )
+    .eq("visibility", "public")
+    .order("created_at", { ascending: false })
+    .limit(limit);
+
+  if (error) throw new Error(error.message);
+  return summarizeTournaments((data ?? []) as unknown as SummaryRow[]);
+}
