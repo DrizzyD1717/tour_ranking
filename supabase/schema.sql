@@ -8,7 +8,7 @@ create extension if not exists "pgcrypto";
 -- ---------- profiles (one per auth user) ------------------------------------
 create table public.profiles (
   id          uuid primary key references auth.users(id) on delete cascade,
-  username    text unique not null,
+  username    text unique not null check (username ~ '^[a-z0-9_]{3,20}$'),
   avatar_url  text,
   created_at  timestamptz not null default now()
 );
@@ -16,8 +16,9 @@ create table public.profiles (
 create function public.handle_new_user() returns trigger
 language plpgsql security definer set search_path = public as $$
 begin
+  -- Never derive this from the email address: profiles are readable by everyone.
   insert into public.profiles (id, username)
-  values (new.id, coalesce(split_part(new.email, '@', 1), 'user') || '_' || substr(new.id::text, 1, 4));
+  values (new.id, 'player_' || substr(replace(new.id::text, '-', ''), 1, 8));
   return new;
 end $$;
 
@@ -194,9 +195,10 @@ create policy "tournaments owner delete" on public.tournaments for delete
 -- tournament_admins
 create policy "admins read" on public.tournament_admins for select
   using (public.tournament_readable(tournament_id));
-create policy "admins owner manage" on public.tournament_admins for all
-  using (public.is_tournament_owner(tournament_id))
-  with check (public.is_tournament_owner(tournament_id));
+create policy "admins owner add scorekeepers" on public.tournament_admins for insert
+  with check (public.is_tournament_owner(tournament_id) and role = 'scorekeeper');
+create policy "admins owner remove scorekeepers" on public.tournament_admins for delete
+  using (public.is_tournament_owner(tournament_id) and role = 'scorekeeper');
 
 -- participants
 create policy "participants read" on public.participants for select
@@ -218,6 +220,7 @@ create policy "matches owner delete" on public.matches for delete
 
 -- Realtime: broadcast match changes so standings update live
 alter publication supabase_realtime add table public.matches;
+alter publication supabase_realtime add table public.tournaments;
 
 -- ============================================================================
 -- Seed: games

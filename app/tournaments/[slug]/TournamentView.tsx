@@ -1,9 +1,16 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, MotionConfig, animate, motion, useMotionValue, useTransform } from "framer-motion";
 import { computeStandings, type GameRules, type MatchResult, type StandingRow } from "@/lib/tournament";
-import { getSupabase, hasSupabase, type MatchRow, type ParticipantRow, type TournamentBundle } from "@/lib/supabase";
+import {
+  getSupabase,
+  hasSupabase,
+  type MatchRow,
+  type ParticipantRow,
+  type Tournament,
+  type TournamentBundle,
+} from "@/lib/supabase";
 import { useUser } from "@/lib/use-user";
 
 // ---------------------------------------------------------------------------
@@ -507,20 +514,331 @@ function Fixtures({
 }
 
 // ---------------------------------------------------------------------------
+// Manage (organizer only)
+// ---------------------------------------------------------------------------
+
+type AdminRow = { user_id: string; role: "owner" | "scorekeeper"; profile: { username: string } | null };
+type Notice = { kind: "error" | "ok"; text: string };
+
+const USERNAME_RE = /^[a-z0-9_]{3,20}$/;
+const FIELD =
+  "w-full rounded-xl border border-border bg-surface-sunken px-4 py-3 outline-none transition placeholder:text-subtle focus:border-primary";
+
+function NoticeLine({ notice }: { notice: Notice | null }) {
+  if (!notice) return null;
+  return notice.kind === "error" ? (
+    <p role="alert" className="mt-3 text-sm text-loss">
+      {notice.text}
+    </p>
+  ) : (
+    <p role="status" className="mt-3 text-sm text-win">
+      {notice.text}
+    </p>
+  );
+}
+
+function SharePanel({ slug, visibility }: { slug: string; visibility: Tournament["visibility"] }) {
+  const [origin, setOrigin] = useState("");
+  const [notice, setNotice] = useState<Notice | null>(null);
+  useEffect(() => setOrigin(window.location.origin), []);
+  const url = `${origin}/tournaments/${slug}`;
+
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(url);
+      setNotice({ kind: "ok", text: "Link copied." });
+    } catch {
+      setNotice({ kind: "error", text: "Couldn't copy automatically. Select the link and copy it by hand." });
+    }
+  }
+
+  return (
+    <section aria-labelledby="share-h" className="p-5 sm:p-6">
+      <h3 id="share-h" className="font-display text-2xl font-bold">
+        Share the link
+      </h3>
+      <p className="mt-1 text-muted">
+        {visibility === "public"
+          ? "This tournament is public, so it is listed on the home page."
+          : "This tournament is link only. It isn't listed, so people need this link to follow it."}
+      </p>
+      <div className="mt-4 flex flex-col gap-2 sm:flex-row">
+        <input readOnly aria-label="Tournament link" value={url} onFocus={(e) => e.currentTarget.select()} className={FIELD} />
+        <button type="button" onClick={copy} className={`${PRIMARY_BTN} shrink-0 py-3`}>
+          Copy link
+        </button>
+      </div>
+      <NoticeLine notice={notice} />
+    </section>
+  );
+}
+
+function ScorekeepersPanel({ demo, tournamentId }: { demo: boolean; tournamentId: string }) {
+  const [admins, setAdmins] = useState<AdminRow[] | null>(null);
+  const [username, setUsername] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<Notice | null>(null);
+
+  const load = useCallback(async () => {
+    const { data, error } = await getSupabase()
+      .from("tournament_admins")
+      .select("user_id, role, profile:profiles(username)")
+      .eq("tournament_id", tournamentId);
+    if (error) {
+      setNotice({ kind: "error", text: `Couldn't load the list: ${error.message}` });
+      return;
+    }
+    const list = (data ?? []) as unknown as AdminRow[];
+    setAdmins([...list].sort((a, b) => Number(b.role === "owner") - Number(a.role === "owner")));
+  }, [tournamentId]);
+
+  useEffect(() => {
+    if (!demo) void load();
+  }, [demo, load]);
+
+  async function add(e: React.FormEvent) {
+    e.preventDefault();
+    const name = username.trim().replace(/^@/, "").toLowerCase();
+    if (!USERNAME_RE.test(name)) {
+      setNotice({ kind: "error", text: "Enter their username, like dari or player_1a2b3c4d." });
+      return;
+    }
+    setBusy(true);
+    setNotice(null);
+    const sb = getSupabase();
+    const found = await sb.from("profiles").select("id, username").eq("username", name).maybeSingle();
+    if (found.error || !found.data) {
+      setBusy(false);
+      setNotice({
+        kind: "error",
+        text: found.error
+          ? found.error.message
+          : `No one has the username @${name}. Ask them to check it on their Account page.`,
+      });
+      return;
+    }
+    const person = found.data as { id: string };
+    if (admins?.some((a) => a.user_id === person.id)) {
+      setBusy(false);
+      setNotice({ kind: "error", text: `@${name} already helps run this tournament.` });
+      return;
+    }
+    const added = await sb
+      .from("tournament_admins")
+      .insert({ tournament_id: tournamentId, user_id: person.id, role: "scorekeeper" });
+    setBusy(false);
+    if (added.error) {
+      setNotice({
+        kind: "error",
+        text: added.error.code === "42501" ? "Only the organizer can add scorekeepers." : added.error.message,
+      });
+      return;
+    }
+    setUsername("");
+    setNotice({ kind: "ok", text: `@${name} can now enter scores.` });
+    await load();
+  }
+
+  async function remove(row: AdminRow) {
+    const name = row.profile?.username ?? "that person";
+    setBusy(true);
+    setNotice(null);
+    const { data, error } = await getSupabase()
+      .from("tournament_admins")
+      .delete()
+      .eq("tournament_id", tournamentId)
+      .eq("user_id", row.user_id)
+      .eq("role", "scorekeeper")
+      .select("user_id");
+    setBusy(false);
+    if (error || !data || data.length === 0) {
+      setNotice({ kind: "error", text: error ? error.message : "Couldn't remove them. Reload the page and try again." });
+      return;
+    }
+    setNotice({ kind: "ok", text: `@${name} can no longer enter scores.` });
+    await load();
+  }
+
+  return (
+    <section aria-labelledby="keepers-h" className="p-5 sm:p-6">
+      <h3 id="keepers-h" className="font-display text-2xl font-bold">
+        Scorekeepers
+      </h3>
+      <p className="mt-1 text-muted">
+        A scorekeeper can enter and fix scores from their own phone. They can&apos;t change teams, add other people or end
+        the tournament.
+      </p>
+
+      {demo ? (
+        <p className="mt-4 rounded-xl border border-dashed border-border-strong px-4 py-3 text-sm text-muted">
+          Scorekeepers work on real tournaments. Start one to try it.
+        </p>
+      ) : (
+        <>
+          {admins && (
+            <ul className="mt-4 divide-y divide-border rounded-xl border border-border">
+              {admins.map((a) => (
+                <li key={a.user_id} className="flex items-center justify-between gap-3 px-4 py-3">
+                  <span className="min-w-0 truncate font-medium">{a.profile ? `@${a.profile.username}` : "Unknown user"}</span>
+                  {a.role === "owner" ? (
+                    <span className="shrink-0 text-sm text-subtle">Organizer</span>
+                  ) : (
+                    <button
+                      type="button"
+                      disabled={busy}
+                      aria-label={`Remove @${a.profile?.username ?? "user"}`}
+                      onClick={() => remove(a)}
+                      className={`${SMALL_BTN} shrink-0 py-1.5`}
+                    >
+                      Remove
+                    </button>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+          {admins && admins.length === 1 && (
+            <p className="mt-3 text-sm text-subtle">No scorekeepers yet. Ask a friend for their username and add them.</p>
+          )}
+
+          <form onSubmit={add} className="mt-4 flex flex-col gap-2 sm:flex-row">
+            <label htmlFor="keeper" className="sr-only">
+              Username of the person to add
+            </label>
+            <input
+              id="keeper"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              placeholder="Their username"
+              autoComplete="off"
+              autoCapitalize="none"
+              spellCheck={false}
+              className={FIELD}
+            />
+            <button type="submit" disabled={busy || username.trim() === ""} className={`${PRIMARY_BTN} shrink-0 py-3`}>
+              Add scorekeeper
+            </button>
+          </form>
+        </>
+      )}
+      <NoticeLine notice={notice} />
+    </section>
+  );
+}
+
+function FinishPanel({
+  status,
+  unplayed,
+  leaderName,
+  onChangeStatus,
+}: {
+  status: Tournament["status"];
+  unplayed: number;
+  leaderName: string | null;
+  onChangeStatus: (next: "live" | "finished") => Promise<string | null>;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const finished = status === "finished";
+
+  async function change(next: "live" | "finished") {
+    setBusy(true);
+    setError(null);
+    const problem = await onChangeStatus(next);
+    setBusy(false);
+    if (problem) setError(problem);
+    else setConfirming(false);
+  }
+
+  return (
+    <section aria-labelledby="finish-h" className="p-5 sm:p-6">
+      <h3 id="finish-h" className="font-display text-2xl font-bold">
+        {finished ? "This tournament is finished" : "End the tournament"}
+      </h3>
+      <p className="mt-1 text-muted">
+        {finished
+          ? `${leaderName ? `${leaderName} won it. ` : ""}Reopen it if a result needs to change or more matches are coming.`
+          : unplayed > 0
+            ? `${unplayed} ${unplayed === 1 ? "match hasn't" : "matches haven't"} been played yet. ${
+                unplayed === 1 ? "It" : "They"
+              } won't count if you end it now.`
+            : leaderName
+              ? `Every match is played and ${leaderName} is top of the table.`
+              : "Nobody has played yet."}
+      </p>
+
+      <div className="mt-4 flex flex-wrap items-center gap-2">
+        {finished ? (
+          <button type="button" disabled={busy} onClick={() => change("live")} className={SMALL_BTN}>
+            Reopen tournament
+          </button>
+        ) : confirming ? (
+          <>
+            <span className="mr-1 font-medium">{leaderName ? `End it and crown ${leaderName}?` : "End it now?"}</span>
+            <button type="button" disabled={busy} onClick={() => change("finished")} className={PRIMARY_BTN}>
+              Yes, end it
+            </button>
+            <button type="button" disabled={busy} onClick={() => setConfirming(false)} className={SMALL_BTN}>
+              Keep going
+            </button>
+          </>
+        ) : (
+          <button type="button" onClick={() => setConfirming(true)} className={PRIMARY_BTN}>
+            End tournament
+          </button>
+        )}
+      </div>
+      {error && (
+        <p role="alert" className="mt-3 text-sm text-loss">
+          {error}
+        </p>
+      )}
+    </section>
+  );
+}
+
+function ManagePanel({
+  demo,
+  tournament,
+  status,
+  unplayed,
+  leaderName,
+  onChangeStatus,
+}: {
+  demo: boolean;
+  tournament: Tournament;
+  status: Tournament["status"];
+  unplayed: number;
+  leaderName: string | null;
+  onChangeStatus: (next: "live" | "finished") => Promise<string | null>;
+}) {
+  return (
+    <div className="divide-y divide-border overflow-hidden rounded-2xl border border-border bg-surface shadow-card">
+      <SharePanel slug={tournament.slug} visibility={tournament.visibility} />
+      <ScorekeepersPanel demo={demo} tournamentId={tournament.id} />
+      <FinishPanel status={status} unplayed={unplayed} leaderName={leaderName} onChangeStatus={onChangeStatus} />
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Page
 // ---------------------------------------------------------------------------
 
-const TABS = [
+type TabId = "standings" | "fixtures" | "manage";
+const TABS: { id: TabId; label: string }[] = [
   { id: "standings", label: "Standings" },
   { id: "fixtures", label: "Fixtures" },
-] as const;
+];
 
 export default function TournamentView({ initial, demo }: { initial: TournamentBundle; demo: boolean }) {
   const { tournament, participants } = initial;
   const game = tournament.game;
 
   const [matches, setMatches] = useState<MatchRow[]>(initial.matches);
-  const [tab, setTab] = useState<(typeof TABS)[number]["id"]>("standings");
+  const [tab, setTab] = useState<TabId>("standings");
+  const [status, setStatus] = useState<Tournament["status"]>(tournament.status);
   const [mounted, setMounted] = useState(false);
   const intro = useRef(true);
 
@@ -546,6 +864,14 @@ export default function TournamentView({ initial, demo }: { initial: TournamentB
             const row = payload.new as MatchRow;
             setMatches((ms) => (ms.some((m) => m.id === row.id) ? ms.map((m) => (m.id === row.id ? row : m)) : [...ms, row]));
           }
+        },
+      )
+      .on(
+        "postgres_changes",
+        { event: "UPDATE", schema: "public", table: "tournaments", filter: `id=eq.${tournament.id}` },
+        (payload) => {
+          const next = (payload.new as { status?: Tournament["status"] }).status;
+          if (next) setStatus(next);
         },
       )
       .subscribe();
@@ -582,6 +908,7 @@ export default function TournamentView({ initial, demo }: { initial: TournamentB
 
   const role = roleResult && roleResult.key === roleKey ? roleResult.role : null;
   const canScore = demo || role !== null;
+  const isOwner = demo || role === "owner";
 
   async function saveMatch(id: string, patch: ScorePatch): Promise<string | null> {
     const current = matches.find((m) => m.id === id);
@@ -604,6 +931,16 @@ export default function TournamentView({ initial, demo }: { initial: TournamentB
       }
     }
     setMatches((ms) => ms.map((m) => (m.id === id ? { ...m, ...patch } : m)));
+    return null;
+  }
+
+  async function changeStatus(next: "live" | "finished"): Promise<string | null> {
+    if (!demo) {
+      const { data, error } = await getSupabase().from("tournaments").update({ status: next }).eq("id", tournament.id).select("id");
+      if (error) return error.message;
+      if (!data || data.length === 0) return "Only the organizer can do that. Sign in as the organizer and try again.";
+    }
+    setStatus(next);
     return null;
   }
 
@@ -643,6 +980,12 @@ export default function TournamentView({ initial, demo }: { initial: TournamentB
       .map(([label, ps]) => ({ label, rows: computeStandings(ps.map((p) => p.id), results, rules) }));
   }, [participants, results, rules]);
 
+  const leader = tables.length === 1 ? tables[0].rows[0] : undefined;
+  const leaderName = leader && leader.played > 0 ? nameOf(leader.id) : null;
+  const champion = status === "finished" && tournament.format === "round_robin" && leader && leader.played > 0 ? leader : null;
+  const unplayed = matches.filter((m) => m.status !== "finished").length;
+  const tabs: { id: TabId; label: string }[] = isOwner ? [...TABS, { id: "manage", label: "Manage" }] : TABS;
+
   const played = matches.filter((m) => m.status === "finished").length;
   const pct = matches.length ? Math.round((played / matches.length) * 100) : 0;
   const isEsports = game.category === "esports";
@@ -673,16 +1016,16 @@ export default function TournamentView({ initial, demo }: { initial: TournamentB
         <div className="relative mx-auto max-w-5xl px-4 pb-8 pt-10 sm:px-6 sm:pb-10 sm:pt-16">
           <div className="flex flex-wrap items-center gap-2 text-sm">
             <span className={`rounded-full border px-3 py-1 font-medium ${accent}`}>{game.name}</span>
-            {tournament.status === "live" && (
+            {status === "live" && (
               <span className="flex items-center gap-2 rounded-full border border-live/30 bg-live/10 px-3 py-1 font-medium text-live">
                 <LiveDot />
                 Live now
               </span>
             )}
-            {tournament.status === "finished" && (
+            {status === "finished" && (
               <span className="rounded-full border border-border bg-surface-raised px-3 py-1 text-muted">Finished</span>
             )}
-            {tournament.status === "draft" && (
+            {status === "draft" && (
               <span className="rounded-full border border-border bg-surface-raised px-3 py-1 text-muted">Not started</span>
             )}
           </div>
@@ -734,11 +1077,12 @@ export default function TournamentView({ initial, demo }: { initial: TournamentB
           <p className="mb-6 rounded-2xl border border-border bg-surface px-4 py-3 text-sm text-muted">
             You are {role === "owner" ? "the organizer" : "a scorekeeper"} of this tournament. Open the Fixtures tab to
             enter scores. Everyone watching sees each change as you save it.
+            {role === "owner" && " Use the Manage tab to share the link, add scorekeepers or end the tournament."}
           </p>
         )}
 
         <div role="tablist" aria-label="Tournament views" className="mb-6 flex gap-1 border-b border-border">
-          {TABS.map((t) => {
+          {tabs.map((t) => {
             const active = t.id === tab;
             return (
               <button
@@ -783,6 +1127,25 @@ export default function TournamentView({ initial, demo }: { initial: TournamentB
                 </p>
               ) : (
                 <div className="space-y-8">
+                  {champion && (
+                    <motion.div
+                      initial={{ opacity: 0, y: -10, scale: 0.98 }}
+                      animate={{ opacity: 1, y: 0, scale: 1 }}
+                      transition={{ type: "spring", stiffness: 260, damping: 24 }}
+                      className="flex items-center gap-4 rounded-2xl border border-gold/40 bg-gold/10 px-5 py-4"
+                    >
+                      <Crest name={nameOf(champion.id)} />
+                      <div className="min-w-0">
+                        <p className="truncate font-display text-4xl font-extrabold leading-none text-gold">
+                          {nameOf(champion.id)}
+                        </p>
+                        <p className="mt-1.5 text-sm text-muted">
+                          Champions with {champion.points} points from {champion.played}{" "}
+                          {champion.played === 1 ? "match" : "matches"}.
+                        </p>
+                      </div>
+                    </motion.div>
+                  )}
                   {tables.map((t) => (
                     <StandingsTable
                       key={t.label}
@@ -798,6 +1161,15 @@ export default function TournamentView({ initial, demo }: { initial: TournamentB
                   </p>
                 </div>
               )
+            ) : tab === "manage" && isOwner ? (
+              <ManagePanel
+                demo={demo}
+                tournament={tournament}
+                status={status}
+                unplayed={unplayed}
+                leaderName={leaderName}
+                onChangeStatus={changeStatus}
+              />
             ) : (
               <Fixtures
                 matches={matches}
