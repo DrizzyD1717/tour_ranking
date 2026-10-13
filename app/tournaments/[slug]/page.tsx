@@ -1,7 +1,7 @@
 import { cache, Suspense } from "react";
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
-import { buildDemoBundle } from "@/lib/demo";
+import { buildDemoBundle, buildDemoGroupsBundle, buildDemoKnockoutBundle } from "@/lib/demo";
 import { getTournamentBundle, hasSupabase } from "@/lib/supabase";
 import TournamentView from "./TournamentView";
 
@@ -11,6 +11,8 @@ import TournamentView from "./TournamentView";
 
 const load = cache(async (slug: string) => {
   if (slug === "demo") return buildDemoBundle();
+  if (slug === "demo-knockout") return buildDemoKnockoutBundle();
+  if (slug === "demo-groups") return buildDemoGroupsBundle();
   if (!hasSupabase) return null;
   return getTournamentBundle(slug);
 });
@@ -33,7 +35,7 @@ async function Tournament({ params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;
   const bundle = await load(slug);
   if (!bundle) notFound();
-  return <TournamentView initial={bundle} demo={slug === "demo"} />;
+  return <TournamentView initial={bundle} demo={slug === "demo" || slug === "demo-knockout" || slug === "demo-groups"} />;
 }
 
 function TournamentSkeleton() {

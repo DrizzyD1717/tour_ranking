@@ -39,6 +39,9 @@ export default function SiteHeader() {
           Matchday
         </Link>
         <nav className="flex items-center gap-1 text-sm sm:gap-2">
+          <Link href="/rankings" className="rounded-full px-3 py-2 text-muted transition-colors hover:text-foreground">
+            Rankings
+          </Link>
           {hasSupabase &&
             !loading &&
             (user ? (

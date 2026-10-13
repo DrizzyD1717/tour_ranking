@@ -4,7 +4,16 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { AnimatePresence, MotionConfig, motion } from "framer-motion";
-import { generateRoundRobin } from "@/lib/tournament";
+import {
+  MAX_ADVANCE,
+  MAX_GROUPS,
+  assignGroups,
+  generateGroupStage,
+  generateKnockout,
+  generateRoundRobin,
+  groupPlanProblem,
+  roundName,
+} from "@/lib/tournament";
 import { getSupabase, hasSupabase, type Game } from "@/lib/supabase";
 import { useUser } from "@/lib/use-user";
 
@@ -26,8 +35,8 @@ const FOCUS_RING = "has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-
 
 const FORMATS = [
   { id: "round_robin", label: "Round robin", hint: "Everyone plays everyone. Ranked in a league table.", ready: true },
-  { id: "knockout", label: "Knockout", hint: "Lose and you're out. Ends in a final.", ready: false },
-  { id: "groups_knockout", label: "Groups, then knockout", hint: "Group tables first, then a bracket.", ready: false },
+  { id: "knockout", label: "Knockout", hint: "Lose and you're out. Ends in a final.", ready: true },
+  { id: "groups_knockout", label: "Groups, then knockout", hint: "Group tables first, then a bracket.", ready: true },
 ] as const;
 
 const VISIBILITY: { id: Visibility; label: string; hint: string; ready: boolean }[] = [
@@ -121,8 +130,10 @@ export default function NewTournamentPage() {
   const [direction, setDirection] = useState(1);
   const [gameId, setGameId] = useState("");
   const [name, setName] = useState("");
-  const [format] = useState<(typeof FORMATS)[number]["id"]>("round_robin");
+  const [format, setFormat] = useState<(typeof FORMATS)[number]["id"]>("round_robin");
   const [doubleRound, setDoubleRound] = useState(false);
+  const [groupCount, setGroupCount] = useState(2);
+  const [advance, setAdvance] = useState(2);
   const [teamsText, setTeamsText] = useState("");
   const [shuffleKey, setShuffleKey] = useState(0);
   const [visibility, setVisibility] = useState<Visibility>("public");
@@ -177,24 +188,65 @@ export default function NewTournamentPage() {
     [parsed.names, shuffleKey],
   );
 
+  const planProblem = format === "groups_knockout" ? groupPlanProblem(ordered.length, groupCount, advance) : null;
+
   const valid = [
     gameId !== "" && name.trim().length >= 3 && name.trim().length <= 60,
-    ordered.length >= 2 && ordered.length <= MAX_ENTRANTS && parsed.tooLong.length === 0,
+    ordered.length >= 2 &&
+      ordered.length <= MAX_ENTRANTS &&
+      parsed.tooLong.length === 0 &&
+      (format !== "groups_knockout" || planProblem === null),
     orgChoice !== NEW_ORG || newOrgName.trim().length >= 2,
     true,
   ];
 
   const schedule = useMemo(() => {
     if (step !== 3 || ordered.length < 2) return null;
-    const result = generateRoundRobin(ordered.map((_, i) => String(i)), { doubleRound });
-    const rounds = new Map<number, { home: string; away: string }[]>();
+    const indexes = ordered.map((_, i) => String(i));
+    const rounds = new Map<number, { home: string; away: string; tag?: string }[]>();
+    if (format === "knockout") {
+      const draw = generateKnockout(indexes);
+      const waiting = "Winner of an earlier match";
+      for (const m of draw.matches) {
+        const list = rounds.get(m.round) ?? [];
+        list.push({ home: m.home ? ordered[Number(m.home)] : waiting, away: m.away ? ordered[Number(m.away)] : waiting });
+        rounds.set(m.round, list);
+      }
+      return {
+        rounds: [...rounds.entries()].sort(([a], [b]) => a - b).map(([r, ms]) => [r, ms, roundName(r, draw.rounds)] as const),
+        total: draw.matches.length,
+        byes: draw.byes.map((i) => ordered[Number(i)]),
+      };
+    }
+    if (format === "groups_knockout") {
+      if (groupPlanProblem(ordered.length, groupCount, advance) !== null) return null;
+      const split = assignGroups(indexes, groupCount);
+      const stage = generateGroupStage(split, { doubleRound });
+      for (const f of stage.fixtures) {
+        const list = rounds.get(f.round) ?? [];
+        list.push({ home: ordered[Number(f.home)], away: ordered[Number(f.away)], tag: `Group ${f.group}` });
+        rounds.set(f.round, list);
+      }
+      return {
+        rounds: [...rounds.entries()].sort(([a], [b]) => a - b).map(([r, ms]) => [r, ms, `Matchday ${r}`] as const),
+        total: stage.fixtures.length,
+        byes: [] as string[],
+        groups: split.map((g) => ({ label: g.label, names: g.ids.map((i) => ordered[Number(i)]) })),
+        note: `${groupCount * advance} teams reach the knockout, drawn once the group matches are played.`,
+      };
+    }
+    const result = generateRoundRobin(indexes, { doubleRound });
     for (const f of result.fixtures) {
       const list = rounds.get(f.round) ?? [];
       list.push({ home: ordered[Number(f.home)], away: ordered[Number(f.away)] });
       rounds.set(f.round, list);
     }
-    return { rounds: [...rounds.entries()].sort(([a], [b]) => a - b), total: result.fixtures.length };
-  }, [step, ordered, doubleRound]);
+    return {
+      rounds: [...rounds.entries()].sort(([a], [b]) => a - b).map(([r, ms]) => [r, ms, `Round ${r}`] as const),
+      total: result.fixtures.length,
+      byes: [] as string[],
+    };
+  }, [step, ordered, doubleRound, format, groupCount, advance]);
 
   function go(to: number) {
     setDirection(to > step ? 1 : -1);
@@ -234,7 +286,8 @@ export default function NewTournamentPage() {
           owner_id: user.id,
           org_id: orgId,
           format,
-          double_round: doubleRound,
+          double_round: format !== "knockout" && doubleRound,
+          ...(format === "groups_knockout" ? { advance_per_group: advance } : {}),
           status: "live",
           visibility,
           starts_at: startsAt ? new Date(startsAt).toISOString() : null,
@@ -243,25 +296,55 @@ export default function NewTournamentPage() {
         if (error.code !== "23505" || attempt >= 2) throw error; // 23505 = slug already taken, try another
       }
 
-      const participants = ordered.map((n, i) => ({
-        id: crypto.randomUUID(),
-        tournament_id: tournamentId,
-        name: n,
-        seed: i + 1,
-      }));
+      const participants: { id: string; tournament_id: string; name: string; seed: number; group_label?: string }[] =
+        ordered.map((n, i) => ({
+          id: crypto.randomUUID(),
+          tournament_id: tournamentId,
+          name: n,
+          seed: i + 1,
+        }));
+      const groupSplit = format === "groups_knockout" ? assignGroups(participants.map((x) => x.id), groupCount) : null;
+      if (groupSplit) {
+        for (const g of groupSplit) for (const id of g.ids) participants.find((x) => x.id === id)!.group_label = g.label;
+      }
       const p = await sb.from("participants").insert(participants);
       if (p.error) throw p.error;
 
-      const fixtures = generateRoundRobin(participants.map((x) => x.id), { doubleRound }).fixtures;
-      const m = await sb.from("matches").insert(
-        fixtures.map((f) => ({
+      let rows: Record<string, unknown>[];
+      if (format === "knockout") {
+        // Every match gets its id now so each can point at the match its winner moves into.
+        const draw = generateKnockout(participants.map((x) => x.id));
+        const idOf = new Map(draw.matches.map((x) => [x.key, crypto.randomUUID()]));
+        rows = draw.matches.map((x) => ({
+          id: idOf.get(x.key),
+          tournament_id: tournamentId,
+          round: x.round,
+          home_id: x.home,
+          away_id: x.away,
+          next_match_id: x.next ? idOf.get(x.next.key) : null,
+          next_slot: x.next ? x.next.slot : null,
+          status: "scheduled",
+        }));
+      } else if (groupSplit) {
+        // The knockout matches are made later, from the final group tables.
+        rows = generateGroupStage(groupSplit, { doubleRound }).fixtures.map((f) => ({
+          tournament_id: tournamentId,
+          round: f.round,
+          group_label: f.group,
+          home_id: f.home,
+          away_id: f.away,
+          status: "scheduled",
+        }));
+      } else {
+        rows = generateRoundRobin(participants.map((x) => x.id), { doubleRound }).fixtures.map((f) => ({
           tournament_id: tournamentId,
           round: f.round,
           home_id: f.home,
           away_id: f.away,
           status: "scheduled",
-        })),
-      );
+        }));
+      }
+      const m = await sb.from("matches").insert(rows);
       if (m.error) throw m.error;
 
       router.push(`/tournaments/${slug}`);
@@ -398,7 +481,14 @@ export default function NewTournamentPage() {
                 f.ready ? "cursor-pointer" : "cursor-not-allowed opacity-60"
               } ${f.id === format ? "border-primary bg-primary/5" : "border-border bg-surface"}`}
             >
-              <input type="radio" name="format" className="sr-only" disabled={!f.ready} checked={f.id === format} readOnly />
+              <input
+                type="radio"
+                name="format"
+                className="sr-only"
+                disabled={!f.ready}
+                checked={f.id === format}
+                onChange={() => setFormat(f.id)}
+              />
               <span className="block font-display text-xl font-bold">{f.label}</span>
               <span className="mt-1 block text-sm text-muted">{f.hint}</span>
               {!f.ready && (
@@ -409,18 +499,54 @@ export default function NewTournamentPage() {
             </label>
           ))}
         </div>
-        <label className="mt-4 flex cursor-pointer items-center gap-3">
-          <input
-            type="checkbox"
-            checked={doubleRound}
-            onChange={(e) => setDoubleRound(e.target.checked)}
-            className="size-5 accent-primary"
-          />
-          <span>
-            Home and away
-            <span className="block text-sm text-muted">Every pairing plays twice, once at each side.</span>
-          </span>
-        </label>
+        {format === "groups_knockout" && (
+          <div className="mt-4 grid gap-4 sm:grid-cols-2">
+            <div>
+              <label htmlFor="groups" className="mb-2 block font-medium">
+                Groups
+              </label>
+              <select id="groups" value={groupCount} onChange={(e) => setGroupCount(Number(e.target.value))} className={INPUT}>
+                {Array.from({ length: MAX_GROUPS - 1 }, (_, i) => i + 2).map((n) => (
+                  <option key={n} value={n}>
+                    {n} groups
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label htmlFor="advance" className="mb-2 block font-medium">
+                Go through from each group
+              </label>
+              <select id="advance" value={advance} onChange={(e) => setAdvance(Number(e.target.value))} className={INPUT}>
+                {Array.from({ length: MAX_ADVANCE }, (_, i) => i + 1).map((n) => (
+                  <option key={n} value={n}>
+                    Top {n}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <p className="text-sm text-muted sm:col-span-2">
+              Teams are split into groups in the order you list them (the best seeds are spread across groups). The knockout is
+              drawn after the last group match.
+            </p>
+          </div>
+        )}
+        {format !== "knockout" && (
+          <label className="mt-4 flex cursor-pointer items-center gap-3">
+            <input
+              type="checkbox"
+              checked={doubleRound}
+              onChange={(e) => setDoubleRound(e.target.checked)}
+              className="size-5 accent-primary"
+            />
+            <span>
+              Home and away
+              <span className="block text-sm text-muted">
+                Every pairing plays twice, once at each side{format === "groups_knockout" ? " (in the group stage)" : ""}.
+              </span>
+            </span>
+          </label>
+        )}
       </fieldset>
     </div>,
 
@@ -442,7 +568,10 @@ export default function NewTournamentPage() {
           placeholder={"Computer Eng\nMechanical\nLaw Lions"}
           spellCheck={false}
         />
-        <p className="mt-2 text-sm text-subtle">You can paste a whole list from a chat or spreadsheet.</p>
+        <p className="mt-2 text-sm text-subtle">
+          You can paste a whole list from a chat or spreadsheet.
+          {format !== "round_robin" && ` The first name is the top seed. Shuffle at the end for a random draw.`}
+        </p>
       </div>
 
       <p aria-live="polite" className="font-display text-2xl font-bold">
@@ -453,9 +582,15 @@ export default function NewTournamentPage() {
             ? `Add at least 2 to start.`
             : ordered.length > MAX_ENTRANTS
               ? `The most you can add is ${MAX_ENTRANTS}.`
-              : ordered.length % 2 === 1
-                ? `With an odd number, one ${entrant} rests each round.`
-                : ""}
+              : format === "groups_knockout"
+                ? planProblem ?? `${ordered.length} split into ${groupCount} groups.`
+                : format === "knockout"
+                ? ordered.length & (ordered.length - 1)
+                  ? `Not a round number, so the top seeds skip round 1.`
+                  : ""
+                : ordered.length % 2 === 1
+                  ? `With an odd number, one ${entrant} rests each round.`
+                  : ""}
         </span>
       </p>
 
@@ -565,7 +700,12 @@ export default function NewTournamentPage() {
         {[
           ["Game", game?.name ?? ""],
           ["Name", name.trim()],
-          ["Format", `${formatLabel}${doubleRound ? ", home and away" : ""}`],
+          [
+            "Format",
+            `${formatLabel}${format !== "knockout" && doubleRound ? ", home and away" : ""}${
+              format === "groups_knockout" ? `, ${groupCount} groups, top ${advance} through` : ""
+            }`,
+          ],
           [entrant === "player" ? "Players" : "Teams", String(ordered.length)],
           ["Visibility", VISIBILITY.find((v) => v.id === visibility)?.label ?? ""],
           ["Department or faculty", orgName],
@@ -582,7 +722,9 @@ export default function NewTournamentPage() {
         <section>
           <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
             <h3 className="font-display text-2xl font-bold">
-              {schedule.total} matches in {schedule.rounds.length} rounds
+              {schedule.total} {format === "groups_knockout" ? "group " : ""}
+              {schedule.total === 1 ? "match" : "matches"} in {schedule.rounds.length}{" "}
+              {schedule.rounds.length === 1 ? (format === "groups_knockout" ? "matchday" : "round") : format === "groups_knockout" ? "matchdays" : "rounds"}
             </h3>
             <button
               type="button"
@@ -593,15 +735,31 @@ export default function NewTournamentPage() {
             </button>
           </div>
 
-          {schedule.rounds.slice(0, 1).map(([round, matches]) => (
-            <RoundList key={round} round={round} matches={matches} />
+          {schedule.groups && (
+            <div className="mb-4 grid gap-3 sm:grid-cols-2">
+              {schedule.groups.map((g) => (
+                <div key={g.label} className="rounded-2xl border border-border bg-surface px-4 py-3">
+                  <h4 className="font-display text-xl font-semibold">Group {g.label}</h4>
+                  <p className="text-muted">{g.names.join(", ")}</p>
+                </div>
+              ))}
+            </div>
+          )}
+          {schedule.note && <p className="mb-3 text-sm text-muted">{schedule.note}</p>}
+          {schedule.byes.length > 0 && (
+            <p className="mb-3 text-sm text-muted">Skipping round 1: {schedule.byes.join(", ")}.</p>
+          )}
+          {schedule.rounds.slice(0, 1).map(([round, matches, title]) => (
+            <RoundList key={round} title={title} matches={matches} />
           ))}
           {schedule.rounds.length > 1 && (
             <details className="mt-3 rounded-2xl border border-border bg-surface px-4 py-3">
-              <summary className="cursor-pointer font-medium">Show the other {schedule.rounds.length - 1} rounds</summary>
+              <summary className="cursor-pointer font-medium">
+                Show the other {schedule.rounds.length - 1} {schedule.rounds.length === 2 ? "round" : "rounds"}
+              </summary>
               <div className="mt-3 space-y-4">
-                {schedule.rounds.slice(1).map(([round, matches]) => (
-                  <RoundList key={round} round={round} matches={matches} />
+                {schedule.rounds.slice(1).map(([round, matches, title]) => (
+                  <RoundList key={round} title={title} matches={matches} />
                 ))}
               </div>
             </details>
@@ -725,13 +883,14 @@ function GameTile({ game, selected, onSelect }: { game: Game; selected: boolean;
   );
 }
 
-function RoundList({ round, matches }: { round: number; matches: { home: string; away: string }[] }) {
+function RoundList({ title, matches }: { title: string; matches: { home: string; away: string; tag?: string }[] }) {
   return (
     <div>
-      <h4 className="mb-2 font-display text-xl font-semibold">Round {round}</h4>
+      <h4 className="mb-2 font-display text-xl font-semibold">{title}</h4>
       <ul className="grid gap-x-6 gap-y-1 text-muted sm:grid-cols-2">
-        {matches.map((m) => (
-          <li key={`${m.home}-${m.away}`}>
+        {matches.map((m, i) => (
+          <li key={i}>
+            {m.tag && <span className="mr-2 text-xs uppercase tracking-wide text-subtle">{m.tag}</span>}
             <span className="text-foreground">{m.home}</span> vs <span className="text-foreground">{m.away}</span>
           </li>
         ))}

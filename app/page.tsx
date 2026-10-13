@@ -31,7 +31,19 @@ export default function Home() {
               href="/tournaments/demo"
               className="inline-flex rounded-full border border-border-strong px-6 py-3 font-semibold transition hover:border-foreground"
             >
-              See a demo
+              Demo league
+            </Link>
+            <Link
+              href="/tournaments/demo-knockout"
+              className="inline-flex rounded-full border border-border-strong px-6 py-3 font-semibold transition hover:border-foreground"
+            >
+              Demo knockout
+            </Link>
+            <Link
+              href="/tournaments/demo-groups"
+              className="inline-flex rounded-full border border-border-strong px-6 py-3 font-semibold transition hover:border-foreground"
+            >
+              Demo groups
             </Link>
           </div>
         </div>

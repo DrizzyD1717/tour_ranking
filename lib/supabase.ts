@@ -1,4 +1,5 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import type { RankingTournament } from "./tournament";
 
 // ---------------------------------------------------------------------------
 // Types (mirror supabase/schema.sql; replace with generated types later if you like)
@@ -22,6 +23,8 @@ export interface Tournament {
   name: string;
   format: "round_robin" | "knockout" | "groups_knockout";
   double_round: boolean;
+  /** groups_knockout only: how many from each group reach the knockout. */
+  advance_per_group: number | null;
   status: "draft" | "live" | "finished";
   visibility: "public" | "unlisted" | "private";
   starts_at: string | null;
@@ -47,6 +50,9 @@ export interface MatchRow {
   away_score: number | null;
   status: "scheduled" | "live" | "finished";
   scheduled_at: string | null;
+  /** Knockout only: the match the winner moves into, and which side of it. */
+  next_match_id: string | null;
+  next_slot: "home" | "away" | null;
 }
 
 export interface TournamentBundle {
@@ -87,7 +93,7 @@ export async function getTournamentBundle(slug: string): Promise<TournamentBundl
   const { data: tournament, error } = await sb
     .from("tournaments")
     .select(
-      "id, slug, name, format, double_round, status, visibility, starts_at, game:games(id, slug, name, category, score_label, allows_draws, pts_win, pts_draw, pts_loss)",
+      "id, slug, name, format, double_round, advance_per_group, status, visibility, starts_at, game:games(id, slug, name, category, score_label, allows_draws, pts_win, pts_draw, pts_loss)",
     )
     .eq("slug", slug)
     .maybeSingle();
@@ -99,7 +105,7 @@ export async function getTournamentBundle(slug: string): Promise<TournamentBundl
     sb.from("participants").select("id, tournament_id, name, group_label, seed").eq("tournament_id", tournament.id).order("seed", { nullsFirst: false }),
     sb
       .from("matches")
-      .select("id, tournament_id, round, group_label, home_id, away_id, home_score, away_score, status, scheduled_at")
+      .select("id, tournament_id, round, group_label, home_id, away_id, home_score, away_score, status, scheduled_at, next_match_id, next_slot")
       .eq("tournament_id", tournament.id)
       .order("round")
       .order("scheduled_at", { nullsFirst: false }),
@@ -113,6 +119,51 @@ export async function getTournamentBundle(slug: string): Promise<TournamentBundl
     participants: (participants.data ?? []) as ParticipantRow[],
     matches: (matches.data ?? []) as MatchRow[],
   };
+}
+
+// ---------------------------------------------------------------------------
+// Rankings
+// ---------------------------------------------------------------------------
+
+interface RankingRowRaw {
+  id: string;
+  slug: string;
+  name: string;
+  status: Tournament["status"];
+  format: Tournament["format"];
+  game: Pick<Game, "slug" | "name" | "category" | "allows_draws" | "pts_win" | "pts_draw" | "pts_loss"> | null;
+  participants: { id: string; name: string }[] | null;
+  matches: (Pick<MatchRow, "id" | "round" | "group_label" | "home_id" | "away_id" | "home_score" | "away_score" | "status" | "next_match_id" | "next_slot">)[] | null;
+}
+
+/** Public tournaments that have started, newest first, in the shape the rankings logic wants. */
+export async function listRankingTournaments(limit = 200): Promise<RankingTournament[]> {
+  const { data, error } = await getSupabase()
+    .from("tournaments")
+    .select(
+      "id, slug, name, status, format, game:games(slug, name, category, allows_draws, pts_win, pts_draw, pts_loss), participants(id, name), matches(id, round, group_label, home_id, away_id, home_score, away_score, status, next_match_id, next_slot)",
+    )
+    .eq("visibility", "public")
+    .in("status", ["live", "finished"])
+    .order("created_at", { ascending: false })
+    .limit(limit);
+
+  if (error) throw new Error(error.message);
+  return ((data ?? []) as unknown as RankingRowRaw[])
+    .filter((r) => r.game)
+    .map((r) => {
+      const g = r.game as NonNullable<RankingRowRaw["game"]>;
+      return {
+        id: r.id,
+        slug: r.slug,
+        name: r.name,
+        status: r.status,
+        format: r.format,
+        game: { slug: g.slug, name: g.name, category: g.category, allowsDraws: g.allows_draws, ptsWin: g.pts_win, ptsDraw: g.pts_draw, ptsLoss: g.pts_loss },
+        participants: r.participants ?? [],
+        matches: r.matches ?? [],
+      };
+    });
 }
 
 // ---------------------------------------------------------------------------

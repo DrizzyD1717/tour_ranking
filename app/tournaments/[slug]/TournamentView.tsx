@@ -2,7 +2,19 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, MotionConfig, animate, motion, useMotionValue, useTransform } from "framer-motion";
-import { computeStandings, type GameRules, type MatchResult, type StandingRow } from "@/lib/tournament";
+import {
+  advanceKnockout,
+  computeStandings,
+  generateKnockout,
+  knockoutWinner,
+  layoutBracket,
+  roundName,
+  seedQualifiers,
+  type BracketLayout,
+  type GameRules,
+  type MatchResult,
+  type StandingRow,
+} from "@/lib/tournament";
 import {
   getSupabase,
   hasSupabase,
@@ -12,24 +24,11 @@ import {
   type TournamentBundle,
 } from "@/lib/supabase";
 import { useUser } from "@/lib/use-user";
+import Crest from "@/app/components/Crest";
 
 // ---------------------------------------------------------------------------
 // Small helpers
 // ---------------------------------------------------------------------------
-
-const CREST_COLORS = ["#c6ff3d", "#9a85ff", "#ff7a52", "#3de0e0", "#ffc83d", "#ff8fb1", "#7ee787", "#6ea8ff"];
-
-function crestColor(name: string) {
-  let h = 0;
-  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
-  return CREST_COLORS[h % CREST_COLORS.length];
-}
-
-function initials(name: string) {
-  const parts = name.trim().split(/\s+/);
-  const letters = parts.length === 1 ? parts[0].slice(0, 2) : parts[0][0] + parts[1][0];
-  return letters.toUpperCase();
-}
 
 const FORMAT_LABEL = {
   round_robin: "Round robin",
@@ -46,21 +45,6 @@ function AnimatedNumber({ value }: { value: number }) {
     return () => controls.stop();
   }, [value, mv]);
   return <motion.span>{text}</motion.span>;
-}
-
-function Crest({ name, size = "md" }: { name: string; size?: "sm" | "md" }) {
-  const color = crestColor(name);
-  return (
-    <span
-      aria-hidden
-      className={`grid shrink-0 place-items-center rounded-lg font-display font-bold ${
-        size === "sm" ? "size-8 text-sm" : "size-10 text-base"
-      }`}
-      style={{ color, background: `${color}1f`, boxShadow: `inset 0 0 0 1px ${color}55` }}
-    >
-      {initials(name)}
-    </span>
-  );
 }
 
 function LiveDot() {
@@ -109,11 +93,14 @@ function StandingsTable({
   nameOf,
   title,
   intro,
+  qualify,
 }: {
   rows: StandingRow[];
   nameOf: (id: string) => string;
   title?: string;
   intro: boolean;
+  /** Groups only: how many places go through. Marks them and draws a line under the last one. */
+  qualify?: number;
 }) {
   return (
     <section aria-label={title ? `Group ${title} standings` : "Standings"}>
@@ -138,6 +125,8 @@ function StandingsTable({
             const name = nameOf(r.id);
             const started = r.played > 0;
             const leader = started && r.rank === 1;
+            const through = qualify !== undefined && i < qualify;
+            const cutLine = qualify !== undefined && i === qualify - 1 && i < rows.length - 1;
             const rankColor = !started ? "text-subtle" : r.rank === 1 ? "text-gold" : r.rank === 2 ? "text-silver" : r.rank === 3 ? "text-bronze" : "text-muted";
             return (
               <motion.li
@@ -150,13 +139,21 @@ function StandingsTable({
                   opacity: { delay: intro ? i * 0.06 : 0, duration: 0.3 },
                   x: { delay: intro ? i * 0.06 : 0, type: "spring", stiffness: 300, damping: 28 },
                 }}
-                className={`${GRID} relative border-b border-border/60 py-2.5 last:border-b-0 ${leader ? "bg-primary/[0.06]" : ""}`}
+                className={`${GRID} relative py-2.5 last:border-b-0 ${
+                  cutLine ? "border-b-2 border-dashed border-primary/30" : "border-b border-border/60"
+                } ${leader ? "bg-primary/[0.06]" : ""}`}
               >
-                {leader && <span aria-hidden className="absolute inset-y-2 left-0 w-[3px] rounded-r bg-primary" />}
+                {(leader || through) && (
+                  <span
+                    aria-hidden
+                    className={`absolute inset-y-2 left-0 w-[3px] rounded-r ${leader ? "bg-primary" : "bg-primary/40"}`}
+                  />
+                )}
                 <span className={`text-center font-display text-3xl font-bold tabular-nums ${rankColor}`}>{r.rank}</span>
                 <span className="flex min-w-0 items-center gap-3">
                   <Crest name={name} />
                   <span className="truncate text-[0.95rem] font-medium">{name}</span>
+                  {through && <span className="sr-only"> (goes through)</span>}
                 </span>
                 <Num>{r.played}</Num>
                 <Num className="hidden sm:block">{r.won}</Num>
@@ -244,6 +241,10 @@ function Stepper({
   );
 }
 
+function TbdCrest() {
+  return <span aria-hidden className="size-8 shrink-0 rounded-lg border border-dashed border-border-strong" />;
+}
+
 function MatchCard({
   match,
   nameOf,
@@ -309,10 +310,13 @@ function MatchCard({
         live ? "border-live/40 shadow-glow-ember" : "border-border"
       }`}
     >
+      {match.group_label && (
+        <p className="-mb-2 text-center text-xs font-medium uppercase tracking-widest text-subtle">Group {match.group_label}</p>
+      )}
       <div className="grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-3 sm:gap-5">
         <span className="flex min-w-0 items-center justify-end gap-3 text-right">
-          <span className={`truncate font-medium ${finished && hs < as ? "text-muted" : ""}`}>{home}</span>
-          <Crest name={home} size="sm" />
+          <span className={`truncate font-medium ${!match.home_id ? "italic text-subtle" : finished && hs < as ? "text-muted" : ""}`}>{home}</span>
+          {match.home_id ? <Crest name={home} size="sm" /> : <TbdCrest />}
         </span>
 
         <span className="flex min-w-[5.5rem] flex-col items-center">
@@ -346,10 +350,14 @@ function MatchCard({
         </span>
 
         <span className="flex min-w-0 items-center gap-3">
-          <Crest name={away} size="sm" />
-          <span className={`truncate font-medium ${finished && as < hs ? "text-muted" : ""}`}>{away}</span>
+          {match.away_id ? <Crest name={away} size="sm" /> : <TbdCrest />}
+          <span className={`truncate font-medium ${!match.away_id ? "italic text-subtle" : finished && as < hs ? "text-muted" : ""}`}>{away}</span>
         </span>
       </div>
+
+      {canScore && !bothTeams && (
+        <p className="text-center text-sm text-subtle">Waiting for the matches before this one to finish.</p>
+      )}
 
       {controls &&
         (live ? (
@@ -438,6 +446,8 @@ function Fixtures({
   showTime,
   canScore,
   onSave,
+  roundLabel,
+  showResting,
 }: {
   matches: MatchRow[];
   participants: ParticipantRow[];
@@ -446,6 +456,8 @@ function Fixtures({
   showTime: boolean;
   canScore: boolean;
   onSave: SaveMatch;
+  roundLabel: (round: number) => string;
+  showResting: boolean;
 }) {
   const rounds = useMemo(() => [...new Set(matches.map((m) => m.round))].sort((a, b) => a - b), [matches]);
 
@@ -463,7 +475,9 @@ function Fixtures({
     );
   }
 
-  const inRound = matches.filter((m) => m.round === round);
+  const inRound = matches
+    .filter((m) => m.round === round)
+    .sort((a, b) => (a.group_label ?? "").localeCompare(b.group_label ?? ""));
   const playing = new Set(inRound.flatMap((m) => [m.home_id, m.away_id]));
   const resting = participants.filter((p) => !playing.has(p.id));
 
@@ -490,25 +504,257 @@ function Fixtures({
                   transition={{ type: "spring", stiffness: 500, damping: 38 }}
                 />
               )}
-              <span className="relative">Round {r}</span>
+              <span className="relative">{roundLabel(r)}</span>
               {hasLive && <span className="relative"><LiveDot /></span>}
             </button>
           );
         })}
       </div>
 
-      <ul className="space-y-3" aria-label={`Round ${round} matches`}>
+      <ul className="space-y-3" aria-label={`${roundLabel(round)} matches`}>
         {inRound.map((m) => (
           <MatchCard key={m.id} match={m} nameOf={nameOf} showTime={showTime} canScore={canScore} onSave={onSave} />
         ))}
       </ul>
 
-      {resting.length > 0 && resting.length < participants.length && (
+      {showResting && resting.length > 0 && resting.length < participants.length && (
         <p className="mt-4 text-sm text-subtle">
           Resting this round: {resting.map((p) => p.name).join(", ")}
         </p>
       )}
       <p className="sr-only">Scores are counted in {scoreLabel.toLowerCase()}.</p>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Knockout bracket
+// ---------------------------------------------------------------------------
+
+const SLOT_H = 112; // height of one round-1 slot in px; every later round doubles it
+const CARD_W = 208;
+const GAP = 32; // space between columns, where the connector lines run
+
+function ChampionBanner({ name, detail }: { name: string; detail: string }) {
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: -10, scale: 0.98 }}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
+      transition={{ type: "spring", stiffness: 260, damping: 24 }}
+      className="flex items-center gap-4 rounded-2xl border border-gold/40 bg-gold/10 px-5 py-4"
+    >
+      <Crest name={name} />
+      <div className="min-w-0">
+        <p className="truncate font-display text-4xl font-extrabold leading-none text-gold">{name}</p>
+        <p className="mt-1.5 text-sm text-muted">{detail}</p>
+      </div>
+    </motion.div>
+  );
+}
+
+function BracketTeam({
+  id,
+  name,
+  score,
+  won,
+  lost,
+  fadeIn,
+}: {
+  id: string | null;
+  name: string;
+  score: number | null;
+  won: boolean;
+  lost: boolean;
+  fadeIn: boolean;
+}) {
+  return (
+    <div
+      className={`relative flex items-center gap-2 px-3 py-2 ${
+        won ? "bg-primary/10 before:absolute before:inset-y-0 before:left-0 before:w-0.5 before:bg-primary" : ""
+      }`}
+    >
+      {id ? <Crest name={name} size="xs" /> : <span aria-hidden className="size-6 shrink-0 rounded-md border border-dashed border-border-strong" />}
+      {/* Re-keyed by name so a winner sliding into an empty slot fades in. */}
+      <motion.span
+        key={name}
+        initial={fadeIn ? { opacity: 0, y: 6 } : false}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.3 }}
+        className={`min-w-0 flex-1 truncate text-sm ${!id ? "italic text-subtle" : lost ? "text-muted" : "font-semibold"}`}
+      >
+        {name}
+      </motion.span>
+      {score !== null && (
+        <span className={`font-display text-2xl font-bold leading-none tabular-nums ${lost ? "text-subtle" : ""}`}>{score}</span>
+      )}
+    </div>
+  );
+}
+
+function BracketCard({
+  match,
+  nameOf,
+  fadeIn,
+}: {
+  match: MatchRow;
+  nameOf: (id: string | null) => string;
+  fadeIn: boolean;
+}) {
+  const winner = knockoutWinner(match);
+  const live = match.status === "live";
+  const showScore = (live || match.status === "finished") && match.home_score !== null && match.away_score !== null;
+  const home = nameOf(match.home_id);
+  const away = nameOf(match.away_id);
+  return (
+    <div
+      className={`relative w-full overflow-hidden rounded-xl border bg-surface ${
+        live ? "border-live/50 shadow-glow-ember" : "border-border"
+      }`}
+    >
+      <p className="sr-only">
+        {home} versus {away}.{" "}
+        {match.status === "finished" ? `Full time ${match.home_score} to ${match.away_score}.` : live ? "Live." : "Not played yet."}
+      </p>
+      <div aria-hidden>
+        <BracketTeam
+          id={match.home_id}
+          name={home}
+          score={showScore ? match.home_score : null}
+          won={winner !== null && winner === match.home_id}
+          lost={winner !== null && winner !== match.home_id}
+          fadeIn={fadeIn}
+        />
+        <div className="h-px bg-border" />
+        <BracketTeam
+          id={match.away_id}
+          name={away}
+          score={showScore ? match.away_score : null}
+          won={winner !== null && winner === match.away_id}
+          lost={winner !== null && winner !== match.away_id}
+          fadeIn={fadeIn}
+        />
+      </div>
+      {live && (
+        <span className="absolute right-2 top-1 flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide text-live" aria-hidden>
+          <LiveDot />
+        </span>
+      )}
+    </div>
+  );
+}
+
+function Bracket({
+  layout,
+  nameOf,
+  champion,
+  mounted,
+  intro,
+}: {
+  layout: BracketLayout<MatchRow>;
+  nameOf: (id: string | null) => string;
+  champion: string | null;
+  mounted: boolean;
+  intro: boolean;
+}) {
+  const rows0 = layout.columns[0].slots.length * SLOT_H;
+  const col1 = layout.columns[0].slots;
+  // Entrants who skip round 1: the team already sitting in a round-2 match whose round-1 feeder slot is empty.
+  const byes = (layout.columns[1]?.slots ?? []).flatMap((m, pos) => {
+    if (!m) return [];
+    const out: string[] = [];
+    if (!col1[pos * 2] && m.home_id) out.push(m.home_id);
+    if (!col1[pos * 2 + 1] && m.away_id) out.push(m.away_id);
+    return out;
+  });
+
+  return (
+    <div>
+      <p className="mb-3 text-sm text-subtle sm:hidden">Swipe sideways to see the later rounds.</p>
+      <div
+        role="region"
+        aria-label="Bracket. Scrolls sideways on small screens."
+        tabIndex={0}
+        className="-mx-4 scroll-pl-4 snap-x overflow-x-auto px-4 pb-4 outline-none sm:scroll-pl-0 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring sm:mx-0 sm:px-0"
+      >
+        <div className="flex w-max">
+          {layout.columns.map((col, ci) => (
+            <section key={col.round} aria-label={roundName(col.round, layout.rounds)} className="shrink-0 snap-start" style={{ width: CARD_W + GAP }}>
+              <h3 className="mb-3 font-display text-xl font-semibold text-muted">{roundName(col.round, layout.rounds)}</h3>
+              <ol>
+                {col.slots.map((m, pos) => {
+                  const isFinal = col.round === layout.rounds;
+                  const hasFeeder =
+                    ci > 0 && (layout.columns[ci - 1].slots[pos * 2] !== null || layout.columns[ci - 1].slots[pos * 2 + 1] !== null);
+                  const done = m !== null && m.status === "finished";
+                  const line = done ? "border-primary" : "border-border-strong";
+                  return (
+                    <li
+                      key={pos}
+                      aria-hidden={m ? undefined : true}
+                      style={{ height: SLOT_H * 2 ** ci, width: CARD_W }}
+                      className="relative flex items-center"
+                    >
+                      {m && (
+                        <motion.div
+                          className="w-full"
+                          initial={intro ? { opacity: 0, x: -14 } : false}
+                          animate={{ opacity: 1, x: 0 }}
+                          transition={{ duration: 0.35, delay: ci * 0.12 + pos * 0.03 }}
+                        >
+                          <BracketCard match={m} nameOf={nameOf} fadeIn={mounted} />
+                        </motion.div>
+                      )}
+                      {m && !isFinal && (
+                        <span
+                          aria-hidden
+                          style={{ width: GAP / 2 }}
+                          className={`absolute -right-4 border-r-2 transition-colors duration-500 ${line} ${
+                            pos % 2 === 0 ? "top-1/2 h-1/2 border-t-2" : "top-0 h-1/2 border-b-2"
+                          }`}
+                        />
+                      )}
+                      {m && isFinal && (
+                        <span aria-hidden style={{ width: GAP }} className={`absolute -right-8 top-1/2 border-t-2 transition-colors duration-500 ${line}`} />
+                      )}
+                      {m && hasFeeder && (
+                        <span aria-hidden style={{ width: GAP / 2 }} className="absolute -left-4 top-1/2 border-t-2 border-border-strong" />
+                      )}
+                    </li>
+                  );
+                })}
+              </ol>
+            </section>
+          ))}
+
+          <section aria-label="Champion" className="shrink-0 snap-start" style={{ width: CARD_W }}>
+            <h3 className="mb-3 font-display text-xl font-semibold text-muted">Champion</h3>
+            <div className="flex items-center" style={{ height: rows0 }}>
+              {champion ? (
+                <motion.div
+                  initial={mounted ? { opacity: 0, scale: 0.9 } : false}
+                  animate={{ opacity: 1, scale: 1 }}
+                  transition={{ type: "spring", stiffness: 260, damping: 20 }}
+                  className="flex w-full flex-col items-center gap-3 rounded-2xl border border-gold/50 bg-gold/10 px-4 py-6 text-center shadow-[0_0_32px_-4px_rgb(255_200_61/0.45)]"
+                >
+                  <Crest name={champion} />
+                  <span className="font-display text-3xl font-extrabold leading-none text-gold">{champion}</span>
+                  <span className="text-xs font-semibold uppercase tracking-widest text-gold/80">Champion</span>
+                </motion.div>
+              ) : (
+                <div className="grid w-full place-items-center rounded-2xl border border-dashed border-border-strong px-4 py-6 text-center text-sm text-subtle">
+                  Winner of the final
+                </div>
+              )}
+            </div>
+          </section>
+        </div>
+      </div>
+
+      {byes.length > 0 && (
+        <p className="mt-2 text-sm text-subtle">
+          Top seeds skip round 1: {byes.map((id) => nameOf(id)).join(", ")}.
+        </p>
+      )}
     </div>
   );
 }
@@ -729,11 +975,13 @@ function ScorekeepersPanel({ demo, tournamentId }: { demo: boolean; tournamentId
 function FinishPanel({
   status,
   unplayed,
+  total,
   leaderName,
   onChangeStatus,
 }: {
   status: Tournament["status"];
   unplayed: number;
+  total: number;
   leaderName: string | null;
   onChangeStatus: (next: "live" | "finished") => Promise<string | null>;
 }) {
@@ -765,7 +1013,9 @@ function FinishPanel({
               } won't count if you end it now.`
             : leaderName
               ? `Every match is played and ${leaderName} is top of the table.`
-              : "Nobody has played yet."}
+              : total > 0 && unplayed === 0
+                ? "Every match is played."
+                : "Nobody has played yet."}
       </p>
 
       <div className="mt-4 flex flex-wrap items-center gap-2">
@@ -798,26 +1048,112 @@ function FinishPanel({
   );
 }
 
+function KnockoutStagePanel({
+  started,
+  remaining,
+  advance,
+  preview,
+  onDraw,
+}: {
+  started: boolean;
+  remaining: number;
+  advance: number;
+  preview: { pairs: { home: string; away: string }[]; byes: string[] } | null;
+  onDraw: () => Promise<string | null>;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function draw() {
+    setBusy(true);
+    setError(null);
+    const problem = await onDraw();
+    setBusy(false);
+    if (problem) setError(problem);
+    else setConfirming(false);
+  }
+
+  return (
+    <section aria-labelledby="ko-stage-h" className="p-5 sm:p-6">
+      <h3 id="ko-stage-h" className="font-display text-2xl font-bold">
+        Knockout stage
+      </h3>
+      <p className="mt-1 text-muted">
+        {started
+          ? "The knockout stage is underway. Group results are now locked."
+          : remaining > 0
+            ? `${remaining} group ${remaining === 1 ? "match" : "matches"} still to play. You can draw the knockout once every group match is finished.`
+            : `Every group match is played. The top ${advance} from each group go through.`}
+      </p>
+
+      {!started && remaining === 0 && preview && (
+        <div className="mt-4">
+          <p className="mb-2 text-sm font-medium">First round of the knockout</p>
+          <ul className="grid gap-x-6 gap-y-1 text-muted sm:grid-cols-2">
+            {preview.pairs.map((p, i) => (
+              <li key={i}>
+                <span className="text-foreground">{p.home}</span> vs <span className="text-foreground">{p.away}</span>
+              </li>
+            ))}
+          </ul>
+          {preview.byes.length > 0 && <p className="mt-2 text-sm text-subtle">Straight into round 2: {preview.byes.join(", ")}.</p>}
+        </div>
+      )}
+
+      {!started && (
+        <div className="mt-4 flex flex-wrap items-center gap-2">
+          {confirming ? (
+            <>
+              <span className="mr-1 font-medium">Draw it now? Group results lock once you do.</span>
+              <button type="button" disabled={busy} onClick={draw} className={PRIMARY_BTN}>
+                Yes, draw it
+              </button>
+              <button type="button" disabled={busy} onClick={() => setConfirming(false)} className={SMALL_BTN}>
+                Not yet
+              </button>
+            </>
+          ) : (
+            <button type="button" disabled={remaining > 0} onClick={() => setConfirming(true)} className={PRIMARY_BTN}>
+              Draw the knockout stage
+            </button>
+          )}
+        </div>
+      )}
+      {error && (
+        <p role="alert" className="mt-3 text-sm text-loss">
+          {error}
+        </p>
+      )}
+    </section>
+  );
+}
+
 function ManagePanel({
   demo,
   tournament,
   status,
   unplayed,
+  total,
   leaderName,
   onChangeStatus,
+  extra,
 }: {
   demo: boolean;
   tournament: Tournament;
   status: Tournament["status"];
   unplayed: number;
+  total: number;
   leaderName: string | null;
   onChangeStatus: (next: "live" | "finished") => Promise<string | null>;
+  extra?: React.ReactNode;
 }) {
   return (
     <div className="divide-y divide-border overflow-hidden rounded-2xl border border-border bg-surface shadow-card">
       <SharePanel slug={tournament.slug} visibility={tournament.visibility} />
       <ScorekeepersPanel demo={demo} tournamentId={tournament.id} />
-      <FinishPanel status={status} unplayed={unplayed} leaderName={leaderName} onChangeStatus={onChangeStatus} />
+      {extra}
+      <FinishPanel status={status} unplayed={unplayed} total={total} leaderName={leaderName} onChangeStatus={onChangeStatus} />
     </div>
   );
 }
@@ -826,7 +1162,7 @@ function ManagePanel({
 // Page
 // ---------------------------------------------------------------------------
 
-type TabId = "standings" | "fixtures" | "manage";
+type TabId = "standings" | "bracket" | "fixtures" | "manage";
 const TABS: { id: TabId; label: string }[] = [
   { id: "standings", label: "Standings" },
   { id: "fixtures", label: "Fixtures" },
@@ -837,7 +1173,10 @@ export default function TournamentView({ initial, demo }: { initial: TournamentB
   const game = tournament.game;
 
   const [matches, setMatches] = useState<MatchRow[]>(initial.matches);
-  const [tab, setTab] = useState<TabId>("standings");
+  const [tab, setTab] = useState<TabId>(tournament.format === "knockout" ? "bracket" : "standings");
+  const [stage, setStage] = useState<"groups" | "knockout">(
+    tournament.format === "groups_knockout" && initial.matches.some((m) => m.group_label === null) ? "knockout" : "groups",
+  );
   const [status, setStatus] = useState<Tournament["status"]>(tournament.status);
   const [mounted, setMounted] = useState(false);
   const intro = useRef(true);
@@ -910,15 +1249,37 @@ export default function TournamentView({ initial, demo }: { initial: TournamentB
   const canScore = demo || role !== null;
   const isOwner = demo || role === "owner";
 
+  const isKnockout = tournament.format === "knockout";
+  const isGroups = tournament.format === "groups_knockout";
+  const advance = tournament.advance_per_group ?? 2;
+  /** True for every match of a knockout, and for the bracket matches (no group) of groups-then-knockout. */
+  const inKnockout = (m: MatchRow) => isKnockout || (isGroups && m.group_label === null);
+  const koStarted = isGroups && matches.some((m) => m.group_label === null);
+
+  // The database trigger moves a knockout winner on and finishes the tournament after the final.
+  // This mirrors that on screen straight away instead of waiting for the live update to arrive.
+  function mirrorFinal(current: MatchRow, patch: ScorePatch) {
+    if (!inKnockout(current) || current.next_match_id !== null || patch.status === undefined) return;
+    if (patch.status === "finished") setStatus((s) => (s === "live" ? "finished" : s));
+    else if (current.status === "finished") setStatus((s) => (s === "finished" ? "live" : s));
+  }
+
   async function saveMatch(id: string, patch: ScorePatch): Promise<string | null> {
     const current = matches.find((m) => m.id === id);
     if (!current) return "This match is no longer part of the tournament. Reload the page.";
     const next = { ...current, ...patch };
+    const knock = inKnockout(current);
 
-    if (next.status === "finished") {
-      if (next.home_score === null || next.away_score === null) return "Enter both scores first.";
-      if (!game.allows_draws && next.home_score === next.away_score) {
-        return `${game.name} has no draws, so one side has to be ahead before full time.`;
+    if (knock) {
+      const checked = advanceKnockout(matches, id, patch);
+      if (checked.error) return checked.error;
+    } else {
+      if (isGroups && koStarted) return "Group results are locked once the knockout stage has started.";
+      if (next.status === "finished") {
+        if (next.home_score === null || next.away_score === null) return "Enter both scores first.";
+        if (!game.allows_draws && next.home_score === next.away_score) {
+          return `${game.name} has no draws, so one side has to be ahead before full time.`;
+        }
       }
     }
 
@@ -930,7 +1291,9 @@ export default function TournamentView({ initial, demo }: { initial: TournamentB
         return "You can't change scores in this tournament. Sign in as the organizer and try again.";
       }
     }
-    setMatches((ms) => ms.map((m) => (m.id === id ? { ...m, ...patch } : m)));
+    // Apply to the latest state, not the copy from when the save started, so live updates that arrived meanwhile survive.
+    setMatches((ms) => (knock ? advanceKnockout(ms, id, patch).rows : ms.map((m) => (m.id === id ? { ...m, ...patch } : m))));
+    mirrorFinal(current, patch);
     return null;
   }
 
@@ -955,7 +1318,8 @@ export default function TournamentView({ initial, demo }: { initial: TournamentB
   const results = useMemo<MatchResult[]>(
     () =>
       matches
-        .filter((m) => m.home_id && m.away_id)
+        // Groups-then-knockout: only group matches feed the tables.
+        .filter((m) => m.home_id && m.away_id && (!isGroups || m.group_label !== null))
         .map((m) => ({
           home: m.home_id as string,
           away: m.away_id as string,
@@ -963,7 +1327,7 @@ export default function TournamentView({ initial, demo }: { initial: TournamentB
           awayScore: m.away_score,
           status: m.status,
         })),
-    [matches],
+    [matches, isGroups],
   );
 
   // One table per group (a single untitled table when there are no groups).
@@ -980,11 +1344,94 @@ export default function TournamentView({ initial, demo }: { initial: TournamentB
       .map(([label, ps]) => ({ label, rows: computeStandings(ps.map((p) => p.id), results, rules) }));
   }, [participants, results, rules]);
 
-  const leader = tables.length === 1 ? tables[0].rows[0] : undefined;
+  const knockoutRows = useMemo(
+    () => (isKnockout ? matches : isGroups ? matches.filter((m) => m.group_label === null) : []),
+    [isKnockout, isGroups, matches],
+  );
+  const bracket = useMemo(() => (knockoutRows.length > 0 ? layoutBracket(knockoutRows) : null), [knockoutRows]);
+  const knockoutChampionId = bracket ? knockoutWinner(bracket.final) : null;
+  const hasBracketTab = isKnockout || isGroups;
+
+  const leader = tables.length === 1 && !isKnockout ? tables[0].rows[0] : undefined;
   const leaderName = leader && leader.played > 0 ? nameOf(leader.id) : null;
   const champion = status === "finished" && tournament.format === "round_robin" && leader && leader.played > 0 ? leader : null;
   const unplayed = matches.filter((m) => m.status !== "finished").length;
-  const tabs: { id: TabId; label: string }[] = isOwner ? [...TABS, { id: "manage", label: "Manage" }] : TABS;
+  const baseTabs: { id: TabId; label: string }[] = isKnockout
+    ? [
+        { id: "bracket", label: "Bracket" },
+        { id: "fixtures", label: "Fixtures" },
+      ]
+    : isGroups
+      ? [
+          { id: "standings", label: "Groups" },
+          { id: "bracket", label: "Knockout" },
+          { id: "fixtures", label: "Fixtures" },
+        ]
+      : TABS;
+  const tabs: { id: TabId; label: string }[] = isOwner ? [...baseTabs, { id: "manage", label: "Manage" }] : baseTabs;
+  const totalRounds = knockoutRows.reduce((n, m) => Math.max(n, m.round), 0);
+  const roundLabel = (r: number) =>
+    isKnockout || (isGroups && stage === "knockout") ? roundName(r, totalRounds) : isGroups ? `Matchday ${r}` : `Round ${r}`;
+  const fixtureMatches = isGroups ? matches.filter((m) => (stage === "knockout" ? m.group_label === null : m.group_label !== null)) : matches;
+
+  const groupRemaining = isGroups ? matches.filter((m) => m.group_label !== null && m.status !== "finished").length : 0;
+  const koPreview = (() => {
+    if (!isGroups || koStarted || groupRemaining > 0) return null;
+    const seeds = seedQualifiers(tables, advance);
+    if (seeds.length < 2) return null;
+    const draw = generateKnockout(seeds);
+    return {
+      pairs: draw.matches.filter((m) => m.round === 1).map((m) => ({ home: nameOf(m.home), away: nameOf(m.away) })),
+      byes: draw.byes.map((id) => nameOf(id)),
+    };
+  })();
+
+  async function startKnockout(): Promise<string | null> {
+    if (!isGroups || koStarted) return "The knockout stage has already been drawn.";
+    const seeds = seedQualifiers(tables, advance);
+    if (seeds.length < 2) return "Not enough teams qualified to draw a knockout.";
+    const draw = generateKnockout(seeds);
+    const idOf = new Map(draw.matches.map((m) => [m.key, crypto.randomUUID()]));
+    const rows: MatchRow[] = draw.matches.map((m) => ({
+      id: idOf.get(m.key) as string,
+      tournament_id: tournament.id,
+      round: m.round,
+      group_label: null,
+      home_id: m.home,
+      away_id: m.away,
+      home_score: null,
+      away_score: null,
+      status: "scheduled",
+      scheduled_at: null,
+      next_match_id: m.next ? (idOf.get(m.next.key) as string) : null,
+      next_slot: m.next ? m.next.slot : null,
+    }));
+    if (!demo) {
+      const { error } = await getSupabase()
+        .from("matches")
+        .insert(
+          rows.map((r) => ({
+            id: r.id,
+            tournament_id: r.tournament_id,
+            round: r.round,
+            home_id: r.home_id,
+            away_id: r.away_id,
+            next_match_id: r.next_match_id,
+            next_slot: r.next_slot,
+            status: "scheduled",
+          })),
+        );
+      if (error) return error.code === "42501" ? "Only the organizer can draw the knockout stage." : error.message;
+    }
+    // A live update may have delivered some of these rows already, so add only the missing ones.
+    setMatches((ms) => {
+      const have = new Set(ms.map((m) => m.id));
+      return [...ms, ...rows.filter((r) => !have.has(r.id))];
+    });
+    setStage("knockout");
+    setTab("bracket");
+    return null;
+  }
 
   const played = matches.filter((m) => m.status === "finished").length;
   const pct = matches.length ? Math.round((played / matches.length) * 100) : 0;
@@ -992,16 +1439,17 @@ export default function TournamentView({ initial, demo }: { initial: TournamentB
   const accent = isEsports ? "text-esports border-esports/30 bg-esports/10" : "text-sports border-sports/30 bg-sports/10";
 
   function playNextMatch() {
-    setMatches((ms) => {
-      const next = [...ms]
-        .sort((a, b) => a.round - b.round)
-        .find((m) => m.status !== "finished" && m.home_id && m.away_id);
-      if (!next) return ms;
-      let h = Math.floor(Math.random() * 5);
-      const a = Math.floor(Math.random() * 4);
-      if (!game.allows_draws && h === a) h++;
-      return ms.map((m) => (m.id === next.id ? { ...m, status: "finished", home_score: h, away_score: a } : m));
-    });
+    const next = [...matches]
+      .sort((a, b) => Number(a.group_label === null && isGroups) - Number(b.group_label === null && isGroups) || a.round - b.round)
+      .find((m) => m.status !== "finished" && m.home_id && m.away_id);
+    if (!next) return;
+    const knock = inKnockout(next);
+    let h = Math.floor(Math.random() * 5);
+    const a = Math.floor(Math.random() * 4);
+    if (h === a && (knock || !game.allows_draws)) h++;
+    const patch: ScorePatch = { status: "finished", home_score: h, away_score: a };
+    setMatches((ms) => (knock ? advanceKnockout(ms, next.id, patch).rows : ms.map((m) => (m.id === next.id ? { ...m, ...patch } : m))));
+    mirrorFinal(next, patch);
   }
 
   const nothingLeft = !matches.some((m) => m.status !== "finished" && m.home_id && m.away_id);
@@ -1036,8 +1484,9 @@ export default function TournamentView({ initial, demo }: { initial: TournamentB
 
           <p className="mt-4 max-w-prose text-muted">
             {FORMAT_LABEL[tournament.format]}
-            {tournament.format === "round_robin" && tournament.double_round ? ", home and away" : ""} with{" "}
-            {participants.length} {isEsports ? "players" : "teams"}.
+            {tournament.format !== "knockout" && tournament.double_round ? ", home and away" : ""} with{" "}
+            {participants.length} {isEsports ? "players" : "teams"}
+            {isGroups ? `, top ${advance} from each group go through` : ""}.
           </p>
 
           <div className="mt-6 max-w-sm">
@@ -1068,7 +1517,7 @@ export default function TournamentView({ initial, demo }: { initial: TournamentB
               disabled={nothingLeft}
               className="cursor-pointer rounded-full bg-primary px-4 py-2 font-semibold text-primary-foreground transition hover:shadow-glow-lime disabled:cursor-not-allowed disabled:opacity-40 disabled:shadow-none"
             >
-              {nothingLeft ? "All matches played" : "Play next match"}
+              {nothingLeft ? (isGroups && !koStarted ? "Groups complete" : "All matches played") : "Play next match"}
             </button>
           </div>
         )}
@@ -1081,7 +1530,11 @@ export default function TournamentView({ initial, demo }: { initial: TournamentB
           </p>
         )}
 
-        <div role="tablist" aria-label="Tournament views" className="mb-6 flex gap-1 border-b border-border">
+        <div
+          role="tablist"
+          aria-label="Tournament views"
+          className="mb-6 flex gap-0 overflow-x-auto border-b border-border [scrollbar-width:none] sm:gap-1 [&::-webkit-scrollbar]:hidden"
+        >
           {tabs.map((t) => {
             const active = t.id === tab;
             return (
@@ -1090,7 +1543,7 @@ export default function TournamentView({ initial, demo }: { initial: TournamentB
                 role="tab"
                 aria-selected={active}
                 onClick={() => setTab(t.id)}
-                className={`relative cursor-pointer px-4 py-3 font-display text-xl font-semibold transition-colors ${
+                className={`relative shrink-0 cursor-pointer whitespace-nowrap px-3 py-3 font-display text-xl font-semibold transition-colors sm:px-4 ${
                   active ? "text-foreground" : "text-subtle hover:text-muted"
                 }`}
               >
@@ -1098,7 +1551,7 @@ export default function TournamentView({ initial, demo }: { initial: TournamentB
                 {active && (
                   <motion.span
                     layoutId="tab-underline"
-                    className="absolute inset-x-3 -bottom-px h-0.5 rounded bg-primary shadow-glow-lime"
+                    className="absolute inset-x-3 bottom-0 h-0.5 rounded bg-primary shadow-glow-lime"
                     transition={{ type: "spring", stiffness: 500, damping: 38 }}
                   />
                 )}
@@ -1115,36 +1568,60 @@ export default function TournamentView({ initial, demo }: { initial: TournamentB
             exit={{ opacity: 0 }}
             transition={{ duration: 0.14 }}
           >
-            {tab === "standings" ? (
-              tournament.format === "knockout" ? (
+            {tab === "bracket" && hasBracketTab ? (
+              bracket ? (
+                <div className="space-y-6">
+                  {knockoutChampionId && (
+                    <ChampionBanner
+                      name={nameOf(knockoutChampionId)}
+                      detail={`Won the ${tournament.name}${totalRounds > 1 ? ` after ${totalRounds} rounds` : ""}.`}
+                    />
+                  )}
+                  <Bracket
+                    layout={bracket}
+                    nameOf={nameOf}
+                    champion={knockoutChampionId ? nameOf(knockoutChampionId) : null}
+                    mounted={mounted}
+                    intro={intro.current}
+                  />
+                  {canScore && (
+                    <p className="text-sm text-subtle">
+                      Enter scores in the Fixtures tab. Winners move into the next round on their own. A knockout match
+                      can&apos;t end level, so count extra time or penalties in the score.
+                    </p>
+                  )}
+                </div>
+              ) : isGroups ? (
+                <div className="rounded-2xl border border-dashed border-border-strong px-5 py-10 text-muted">
+                  <p className="font-display text-2xl font-bold text-foreground">The knockout hasn&apos;t started.</p>
+                  <p className="mt-1 max-w-prose">
+                    {groupRemaining > 0
+                      ? `It is drawn once every group match is played. ${groupRemaining} ${groupRemaining === 1 ? "match is" : "matches are"} still to go.`
+                      : isOwner
+                        ? "Every group match is played. Open the Manage tab to draw the knockout stage."
+                        : "Every group match is played. The organizer will draw the knockout stage next."}
+                  </p>
+                </div>
+              ) : (
                 <p className="rounded-2xl border border-dashed border-border-strong px-5 py-10 text-muted">
-                  Knockout tournaments show a bracket instead of a table. The bracket view is next on the build list;
-                  the Fixtures tab already lists every match.
+                  The bracket isn&apos;t available for this tournament. The Fixtures tab lists every match.
                 </p>
-              ) : participants.length === 0 ? (
+              )
+            ) : tab === "standings" ? (
+              participants.length === 0 ? (
                 <p className="rounded-2xl border border-dashed border-border-strong px-5 py-10 text-muted">
                   No teams yet. Add teams to this tournament to start the table.
                 </p>
               ) : (
                 <div className="space-y-8">
                   {champion && (
-                    <motion.div
-                      initial={{ opacity: 0, y: -10, scale: 0.98 }}
-                      animate={{ opacity: 1, y: 0, scale: 1 }}
-                      transition={{ type: "spring", stiffness: 260, damping: 24 }}
-                      className="flex items-center gap-4 rounded-2xl border border-gold/40 bg-gold/10 px-5 py-4"
-                    >
-                      <Crest name={nameOf(champion.id)} />
-                      <div className="min-w-0">
-                        <p className="truncate font-display text-4xl font-extrabold leading-none text-gold">
-                          {nameOf(champion.id)}
-                        </p>
-                        <p className="mt-1.5 text-sm text-muted">
-                          Champions with {champion.points} points from {champion.played}{" "}
-                          {champion.played === 1 ? "match" : "matches"}.
-                        </p>
-                      </div>
-                    </motion.div>
+                    <ChampionBanner
+                      name={nameOf(champion.id)}
+                      detail={`Champions with ${champion.points} points from ${champion.played} ${champion.played === 1 ? "match" : "matches"}.`}
+                    />
+                  )}
+                  {isGroups && knockoutChampionId && (
+                    <ChampionBanner name={nameOf(knockoutChampionId)} detail={`Won the ${tournament.name}.`} />
                   )}
                   {tables.map((t) => (
                     <StandingsTable
@@ -1153,11 +1630,13 @@ export default function TournamentView({ initial, demo }: { initial: TournamentB
                       rows={t.rows}
                       nameOf={(id) => nameOf(id)}
                       intro={intro.current}
+                      qualify={isGroups ? advance : undefined}
                     />
                   ))}
                   <p className="text-sm text-subtle">
                     Ranked by points, then goal difference, then {game.score_label.toLowerCase()} scored, then results
                     between the tied teams.
+                    {isGroups && ` The top ${advance} in each group go through to the knockout.`}
                   </p>
                 </div>
               )
@@ -1167,19 +1646,53 @@ export default function TournamentView({ initial, demo }: { initial: TournamentB
                 tournament={tournament}
                 status={status}
                 unplayed={unplayed}
-                leaderName={leaderName}
+                total={matches.length}
+                leaderName={hasBracketTab ? (status === "finished" && knockoutChampionId ? nameOf(knockoutChampionId) : null) : leaderName}
                 onChangeStatus={changeStatus}
+                extra={
+                  isGroups ? (
+                    <KnockoutStagePanel
+                      started={koStarted}
+                      remaining={groupRemaining}
+                      advance={advance}
+                      preview={koPreview}
+                      onDraw={startKnockout}
+                    />
+                  ) : undefined
+                }
               />
             ) : (
-              <Fixtures
-                matches={matches}
-                participants={participants}
-                nameOf={nameOf}
-                scoreLabel={game.score_label}
-                showTime={mounted}
-                canScore={canScore}
-                onSave={saveMatch}
-              />
+              <div>
+                {isGroups && (
+                  <div role="group" aria-label="Stage" className="mb-4 flex gap-2">
+                    {(["groups", "knockout"] as const).map((st) => (
+                      <button
+                        key={st}
+                        type="button"
+                        aria-pressed={stage === st}
+                        onClick={() => setStage(st)}
+                        className={`cursor-pointer rounded-full border px-4 py-2 text-sm font-medium transition ${
+                          stage === st ? "border-primary text-primary" : "border-border-strong text-muted hover:text-foreground"
+                        }`}
+                      >
+                        {st === "groups" ? "Group stage" : "Knockout"}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                <Fixtures
+                  key={stage}
+                  matches={fixtureMatches}
+                  participants={participants}
+                  nameOf={nameOf}
+                  scoreLabel={game.score_label}
+                  showTime={mounted}
+                  canScore={canScore}
+                  onSave={saveMatch}
+                  roundLabel={roundLabel}
+                  showResting={!isKnockout && !isGroups}
+                />
+              </div>
             )}
           </motion.div>
         </AnimatePresence>
