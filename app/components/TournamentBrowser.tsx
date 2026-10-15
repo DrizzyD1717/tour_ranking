@@ -19,6 +19,8 @@ const FILTERS: { id: Filter; label: string }[] = [
   { id: "sport", label: "Physical sports" },
 ];
 
+const PAGE = 12;
+
 export default function TournamentBrowser({
   tournaments,
   notice,
@@ -29,18 +31,44 @@ export default function TournamentBrowser({
   emptyText?: string;
 }) {
   const [filter, setFilter] = useState<Filter>("all");
-  const shown = tournaments.filter((t) => filter === "all" || t.game.category === filter);
-  const count = (f: Filter) => tournaments.filter((t) => f === "all" || t.game.category === f).length;
+  const [query, setQuery] = useState("");
+  const [limit, setLimit] = useState(PAGE);
+
+  // Search covers the tournament name and the game; the chip counts follow the search.
+  const q = query.trim().toLowerCase();
+  const matching = q
+    ? tournaments.filter((t) => `${t.name} ${t.game.name}`.toLowerCase().includes(q))
+    : tournaments;
+  const matches = matching.filter((t) => filter === "all" || t.game.category === filter);
+  const shown = matches.slice(0, limit);
+  const count = (f: Filter) => matching.filter((t) => f === "all" || t.game.category === f).length;
 
   return (
     <div>
       {notice && <p className="mb-6 rounded-xl border border-border bg-surface px-4 py-3 text-muted">{notice}</p>}
 
+      {tournaments.length > 0 && (
+        <input
+          type="search"
+          value={query}
+          onChange={(e) => {
+            setQuery(e.target.value);
+            setLimit(PAGE);
+          }}
+          placeholder="Search tournaments or games"
+          aria-label="Search tournaments"
+          className="mb-4 w-full rounded-xl border border-border bg-surface-sunken px-4 py-3 outline-none transition placeholder:text-subtle focus:border-primary"
+        />
+      )}
+
       <div className="mb-6 flex flex-wrap gap-2" role="group" aria-label="Filter by type">
         {FILTERS.map((f) => (
           <button
             key={f.id}
-            onClick={() => setFilter(f.id)}
+            onClick={() => {
+              setFilter(f.id);
+              setLimit(PAGE);
+            }}
             aria-pressed={filter === f.id}
             className={`cursor-pointer rounded-full border px-4 py-2 text-sm font-semibold transition-colors ${
               filter === f.id
@@ -56,7 +84,11 @@ export default function TournamentBrowser({
 
       {shown.length === 0 ? (
         <p className="rounded-2xl border border-dashed border-border-strong px-6 py-12 text-center text-muted">
-          {tournaments.length === 0 ? emptyText : "Nothing in this category yet."}
+          {tournaments.length === 0
+            ? emptyText
+            : q
+              ? `No tournaments match "${query.trim()}".`
+              : "Nothing in this category yet."}
         </p>
       ) : (
         <ul className="space-y-3">
@@ -100,6 +132,17 @@ export default function TournamentBrowser({
             </motion.li>
           ))}
         </ul>
+      )}
+
+      {matches.length > shown.length && (
+        <div className="mt-6 flex justify-center">
+          <button
+            onClick={() => setLimit((n) => n + PAGE)}
+            className="cursor-pointer rounded-full border border-border-strong px-6 py-3 font-semibold transition hover:border-foreground"
+          >
+            Show more ({matches.length - shown.length} left)
+          </button>
+        </div>
       )}
     </div>
   );

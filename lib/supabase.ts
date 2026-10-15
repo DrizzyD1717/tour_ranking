@@ -225,7 +225,7 @@ export function summarizeTournaments(rows: SummaryRow[]): TournamentSummary[] {
 }
 
 /** Public tournaments only. Link-only and private ones are never listed. */
-export async function listPublicTournaments(limit = 30): Promise<TournamentSummary[]> {
+export async function listPublicTournaments(limit = 200): Promise<TournamentSummary[]> {
   const { data, error } = await getSupabase()
     .from("tournaments")
     .select(
