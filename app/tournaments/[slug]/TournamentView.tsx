@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 import { AnimatePresence, MotionConfig, animate, motion, useMotionValue, useTransform } from "framer-motion";
 import {
   advanceKnockout,
@@ -17,6 +18,7 @@ import {
 } from "@/lib/tournament";
 import {
   getSupabase,
+  getTournamentBundle,
   hasSupabase,
   type MatchRow,
   type ParticipantRow,
@@ -806,7 +808,9 @@ function SharePanel({ slug, visibility }: { slug: string; visibility: Tournament
       <p className="mt-1 text-muted">
         {visibility === "public"
           ? "This tournament is public, so it is listed on the home page."
-          : "This tournament is link only. It isn't listed, so people need this link to follow it."}
+          : visibility === "unlisted"
+            ? "This tournament is link only. It isn't listed, so people need this link to follow it."
+            : "This tournament is private. Only you and your scorekeepers can open this link, and they need to be signed in."}
       </p>
       <div className="mt-4 flex flex-col gap-2 sm:flex-row">
         <input readOnly aria-label="Tournament link" value={url} onFocus={(e) => e.currentTarget.select()} className={FIELD} />
@@ -1129,6 +1133,84 @@ function KnockoutStagePanel({
   );
 }
 
+const VISIBILITY_OPTIONS: { id: Tournament["visibility"]; label: string; hint: string }[] = [
+  { id: "public", label: "Public", hint: "Listed on the site and in rankings." },
+  { id: "unlisted", label: "Link only", hint: "Not listed. Anyone with the link can follow it." },
+  { id: "private", label: "Private", hint: "Only you and your scorekeepers, signed in." },
+];
+
+function VisibilityPanel({
+  visibility,
+  onChange,
+}: {
+  visibility: Tournament["visibility"];
+  onChange: (next: Tournament["visibility"]) => Promise<string | null>;
+}) {
+  const [pending, setPending] = useState<Tournament["visibility"] | null>(null); // awaiting confirmation
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<Notice | null>(null);
+
+  async function apply(next: Tournament["visibility"]) {
+    setBusy(true);
+    setNotice(null);
+    const error = await onChange(next);
+    setBusy(false);
+    setPending(null);
+    setNotice(error ? { kind: "error", text: error } : { kind: "ok", text: "Visibility updated." });
+  }
+
+  function choose(next: Tournament["visibility"]) {
+    if (next === visibility || busy) return;
+    setNotice(null);
+    // Going private hides it from everyone else straight away, so ask first.
+    if (next === "private") setPending(next);
+    else void apply(next);
+  }
+
+  return (
+    <section aria-labelledby="vis-h" className="p-5 sm:p-6">
+      <h3 id="vis-h" className="font-display text-2xl font-bold">
+        Who can see it
+      </h3>
+      <div role="radiogroup" aria-labelledby="vis-h" className="mt-4 grid gap-3 sm:grid-cols-3">
+        {VISIBILITY_OPTIONS.map((o) => (
+          <button
+            key={o.id}
+            type="button"
+            role="radio"
+            aria-checked={o.id === visibility}
+            disabled={busy}
+            onClick={() => choose(o.id)}
+            className={`cursor-pointer rounded-2xl border p-4 text-left transition disabled:cursor-not-allowed disabled:opacity-60 ${
+              o.id === visibility ? "border-primary bg-primary/5" : "border-border bg-surface hover:border-border-strong"
+            }`}
+          >
+            <span className="block font-display text-xl font-bold">{o.label}</span>
+            <span className="mt-1 block text-sm text-muted">{o.hint}</span>
+          </button>
+        ))}
+      </div>
+      {pending && (
+        <div role="alertdialog" aria-label="Confirm making it private" className="mt-4 rounded-2xl border border-loss/40 bg-loss/10 p-4">
+          <p className="text-sm">
+            Make this tournament private? It will disappear from the home page and rankings, and anyone who isn&apos;t
+            you or a scorekeeper will no longer be able to open it.
+          </p>
+          <div className="mt-3 flex gap-2">
+            <button type="button" disabled={busy} onClick={() => apply("private")} className={PRIMARY_BTN}>
+              Make private
+            </button>
+            <button type="button" disabled={busy} onClick={() => setPending(null)} className={SMALL_BTN}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+      <NoticeLine notice={notice} />
+    </section>
+  );
+}
+
 function ManagePanel({
   demo,
   tournament,
@@ -1137,10 +1219,14 @@ function ManagePanel({
   total,
   leaderName,
   onChangeStatus,
+  visibility,
+  onChangeVisibility,
   extra,
 }: {
   demo: boolean;
   tournament: Tournament;
+  visibility: Tournament["visibility"];
+  onChangeVisibility: (next: Tournament["visibility"]) => Promise<string | null>;
   status: Tournament["status"];
   unplayed: number;
   total: number;
@@ -1150,7 +1236,8 @@ function ManagePanel({
 }) {
   return (
     <div className="divide-y divide-border overflow-hidden rounded-2xl border border-border bg-surface shadow-card">
-      <SharePanel slug={tournament.slug} visibility={tournament.visibility} />
+      <SharePanel slug={tournament.slug} visibility={visibility} />
+      <VisibilityPanel visibility={visibility} onChange={onChangeVisibility} />
       <ScorekeepersPanel demo={demo} tournamentId={tournament.id} />
       {extra}
       <FinishPanel status={status} unplayed={unplayed} total={total} leaderName={leaderName} onChangeStatus={onChangeStatus} />
@@ -1168,6 +1255,65 @@ const TABS: { id: TabId; label: string }[] = [
   { id: "fixtures", label: "Fixtures" },
 ];
 
+/**
+ * Private tournaments can't be read by the server (it fetches as an anonymous visitor), so the page hands
+ * those slugs to this component, which asks again from the browser with the signed-in session.
+ */
+export function TournamentGate({ slug }: { slug: string }) {
+  const { user, loading } = useUser();
+  const userId = user?.id ?? null;
+  const [result, setResult] = useState<
+    { key: string; bundle: TournamentBundle | null; error: string | null } | null
+  >(null);
+  const key = `${slug}:${userId ?? "anon"}`;
+
+  useEffect(() => {
+    if (loading) return;
+    let active = true;
+    getTournamentBundle(slug)
+      .then((bundle) => active && setResult({ key, bundle, error: null }))
+      .catch((e) => active && setResult({ key, bundle: null, error: e instanceof Error ? e.message : "Unknown error" }));
+    return () => {
+      active = false;
+    };
+  }, [loading, slug, key]);
+
+  if (loading || !result || result.key !== key) {
+    return <div aria-busy="true" aria-label="Loading tournament" className="mx-auto max-w-5xl px-4 py-16 sm:px-6"><div className="skeleton h-40 rounded-2xl" /></div>;
+  }
+  if (result.bundle) return <TournamentView key={result.bundle.tournament.id} initial={result.bundle} demo={false} />;
+
+  return (
+    <main className="bg-floodlight min-h-[calc(100dvh-3.5rem)] px-4 py-16 sm:px-6 sm:py-24">
+      <div className="mx-auto max-w-xl">
+        <h1 className="font-display text-5xl font-extrabold leading-[0.95] tracking-tight sm:text-7xl">
+          {result.error ? "Couldn't load it" : "Tournament not found"}
+        </h1>
+        <p role={result.error ? "alert" : undefined} className="mt-5 text-lg text-muted">
+          {result.error
+            ? result.error
+            : userId
+              ? "This link may be wrong, or it is a private tournament and this account isn't an organizer or scorekeeper."
+              : "This link may be wrong, or the tournament is private. If it's yours, sign in to open it."}
+        </p>
+        <div className="mt-8 flex flex-wrap gap-3">
+          {!userId && (
+            <Link
+              href={`/auth?next=/tournaments/${slug}`}
+              className="inline-flex rounded-full bg-primary px-6 py-3 font-semibold text-primary-foreground transition hover:shadow-glow-lime"
+            >
+              Sign in
+            </Link>
+          )}
+          <Link href="/" className="inline-flex rounded-full border border-border-strong px-6 py-3 font-semibold transition hover:border-foreground">
+            Back home
+          </Link>
+        </div>
+      </div>
+    </main>
+  );
+}
+
 export default function TournamentView({ initial, demo }: { initial: TournamentBundle; demo: boolean }) {
   const { tournament, participants } = initial;
   const game = tournament.game;
@@ -1178,6 +1324,7 @@ export default function TournamentView({ initial, demo }: { initial: TournamentB
     tournament.format === "groups_knockout" && initial.matches.some((m) => m.group_label === null) ? "knockout" : "groups",
   );
   const [status, setStatus] = useState<Tournament["status"]>(tournament.status);
+  const [visibility, setVisibility] = useState<Tournament["visibility"]>(tournament.visibility);
   const [mounted, setMounted] = useState(false);
   const intro = useRef(true);
 
@@ -1209,8 +1356,9 @@ export default function TournamentView({ initial, demo }: { initial: TournamentB
         "postgres_changes",
         { event: "UPDATE", schema: "public", table: "tournaments", filter: `id=eq.${tournament.id}` },
         (payload) => {
-          const next = (payload.new as { status?: Tournament["status"] }).status;
-          if (next) setStatus(next);
+          const row = payload.new as { status?: Tournament["status"]; visibility?: Tournament["visibility"] };
+          if (row.status) setStatus(row.status);
+          if (row.visibility) setVisibility(row.visibility);
         },
       )
       .subscribe();
@@ -1452,6 +1600,19 @@ export default function TournamentView({ initial, demo }: { initial: TournamentB
     mirrorFinal(next, patch);
   }
 
+  async function changeVisibility(next: Tournament["visibility"]): Promise<string | null> {
+    if (demo) {
+      setVisibility(next);
+      return null;
+    }
+    // .select() so a change the database silently refused (0 rows) is reported instead of looking saved.
+    const { data, error } = await getSupabase().from("tournaments").update({ visibility: next }).eq("id", tournament.id).select("id");
+    if (error) return error.message;
+    if (!data || data.length === 0) return "Couldn't change visibility. Only the organizer can do that.";
+    setVisibility(next);
+    return null;
+  }
+
   const nothingLeft = !matches.some((m) => m.status !== "finished" && m.home_id && m.away_id);
 
   return (
@@ -1472,6 +1633,11 @@ export default function TournamentView({ initial, demo }: { initial: TournamentB
             )}
             {status === "finished" && (
               <span className="rounded-full border border-border bg-surface-raised px-3 py-1 text-muted">Finished</span>
+            )}
+            {visibility !== "public" && (
+              <span className="rounded-full border border-border bg-surface-raised px-3 py-1 text-muted">
+                {visibility === "private" ? "Private" : "Link only"}
+              </span>
             )}
             {status === "draft" && (
               <span className="rounded-full border border-border bg-surface-raised px-3 py-1 text-muted">Not started</span>
@@ -1649,6 +1815,8 @@ export default function TournamentView({ initial, demo }: { initial: TournamentB
                 total={matches.length}
                 leaderName={hasBracketTab ? (status === "finished" && knockoutChampionId ? nameOf(knockoutChampionId) : null) : leaderName}
                 onChangeStatus={changeStatus}
+                visibility={visibility}
+                onChangeVisibility={changeVisibility}
                 extra={
                   isGroups ? (
                     <KnockoutStagePanel

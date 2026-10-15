@@ -156,6 +156,10 @@ export default function AccountPage() {
         {busy ? "Saving..." : "Save username"}
       </button>
 
+      <Link href="/my-tournaments" className="block text-sm font-medium text-primary underline-offset-4 hover:underline">
+        My tournaments
+      </Link>
+
       <div className="flex items-center justify-between gap-4 border-t border-border pt-5 text-sm text-muted">
         <span className="min-w-0 truncate">Signed in as {user.email}</span>
         <button type="button" onClick={signOut} className="shrink-0 cursor-pointer underline-offset-4 hover:text-foreground hover:underline">

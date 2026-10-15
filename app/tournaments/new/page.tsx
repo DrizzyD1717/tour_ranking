@@ -42,7 +42,7 @@ const FORMATS = [
 const VISIBILITY: { id: Visibility; label: string; hint: string; ready: boolean }[] = [
   { id: "public", label: "Public", hint: "Listed on the site. Anyone can follow it.", ready: true },
   { id: "unlisted", label: "Link only", hint: "Not listed. Anyone with the link can follow it.", ready: true },
-  { id: "private", label: "Private", hint: "Only you and your scorekeepers can see it.", ready: false },
+  { id: "private", label: "Private", hint: "Only you and your scorekeepers can see it. Sign-in required.", ready: true },
 ];
 
 function slugify(text: string) {

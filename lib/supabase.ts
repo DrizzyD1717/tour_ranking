@@ -177,6 +177,7 @@ export interface TournamentSummary {
   status: Tournament["status"];
   format: Tournament["format"];
   createdAt: string;
+  visibility?: Tournament["visibility"];
   game: { name: string; slug: string; category: Game["category"] };
   /** Teams or players entered. */
   entrants: number;
@@ -191,6 +192,7 @@ interface SummaryRow {
   status: Tournament["status"];
   format: Tournament["format"];
   created_at: string;
+  visibility?: Tournament["visibility"];
   game: { name: string; slug: string; category: Game["category"] } | null;
   participants: { count: number }[] | null;
   matches: { status: MatchRow["status"] }[] | null;
@@ -209,6 +211,7 @@ export function summarizeTournaments(rows: SummaryRow[]): TournamentSummary[] {
         status: r.status,
         format: r.format,
         createdAt: r.created_at,
+        visibility: r.visibility,
         game: r.game as TournamentSummary["game"],
         entrants: r.participants?.[0]?.count ?? 0,
         played: matches.filter((m) => m.status === "finished").length,
@@ -232,6 +235,28 @@ export async function listPublicTournaments(limit = 30): Promise<TournamentSumma
     .order("created_at", { ascending: false })
     .limit(limit);
 
+  if (error) throw new Error(error.message);
+  return summarizeTournaments((data ?? []) as unknown as SummaryRow[]);
+}
+
+/**
+ * Every tournament the signed-in person can administer (owner or scorekeeper), whatever its visibility.
+ * Must run in the browser: the session lives in browser storage, so the server would read as anonymous.
+ */
+export async function listMyTournaments(userId: string): Promise<TournamentSummary[]> {
+  const sb = getSupabase();
+  const { data: admin, error: adminError } = await sb.from("tournament_admins").select("tournament_id").eq("user_id", userId);
+  if (adminError) throw new Error(adminError.message);
+  const ids = (admin ?? []).map((a) => a.tournament_id as string);
+  if (ids.length === 0) return [];
+
+  const { data, error } = await sb
+    .from("tournaments")
+    .select(
+      "id, slug, name, status, format, visibility, created_at, game:games(name, slug, category), participants(count), matches(status)",
+    )
+    .in("id", ids)
+    .order("created_at", { ascending: false });
   if (error) throw new Error(error.message);
   return summarizeTournaments((data ?? []) as unknown as SummaryRow[]);
 }

@@ -47,6 +47,12 @@ export default function SiteHeader() {
             (user ? (
               <>
                 <Link
+                  href="/my-tournaments"
+                  className="hidden rounded-full px-3 py-2 text-muted transition-colors hover:text-foreground sm:block"
+                >
+                  My tournaments
+                </Link>
+                <Link
                   href="/account"
                   aria-label="Your account"
                   className="max-w-[9rem] truncate rounded-full px-3 py-2 text-muted transition-colors hover:text-foreground"

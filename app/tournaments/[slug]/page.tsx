@@ -3,7 +3,7 @@ import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { buildDemoBundle, buildDemoGroupsBundle, buildDemoKnockoutBundle } from "@/lib/demo";
 import { getTournamentBundle, hasSupabase } from "@/lib/supabase";
-import TournamentView from "./TournamentView";
+import TournamentView, { TournamentGate } from "./TournamentView";
 
 // With cacheComponents on, pages are dynamic by default (no `export const dynamic` needed, and it is
 // not allowed). Anything fetched at request time must sit inside a <Suspense> boundary, so the page
@@ -20,7 +20,7 @@ const load = cache(async (slug: string) => {
 export async function generateMetadata({ params }: { params: Promise<{ slug: string }> }): Promise<Metadata> {
   const { slug } = await params;
   const bundle = await load(slug);
-  return { title: bundle ? bundle.tournament.name : "Tournament not found" };
+  return { title: bundle ? bundle.tournament.name : "Tournament" };
 }
 
 export default function TournamentPage({ params }: { params: Promise<{ slug: string }> }) {
@@ -34,7 +34,12 @@ export default function TournamentPage({ params }: { params: Promise<{ slug: str
 async function Tournament({ params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;
   const bundle = await load(slug);
-  if (!bundle) notFound();
+  if (!bundle) {
+    // The server reads as an anonymous visitor, so a private tournament looks missing here. With Supabase
+    // connected, let the browser try again with the signed-in session before giving up.
+    if (!hasSupabase) notFound();
+    return <TournamentGate slug={slug} />;
+  }
   return <TournamentView initial={bundle} demo={slug === "demo" || slug === "demo-knockout" || slug === "demo-groups"} />;
 }
 
