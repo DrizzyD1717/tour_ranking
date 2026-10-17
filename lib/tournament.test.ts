@@ -548,7 +548,7 @@ describe("seedQualifiers", () => {
 // ---------------------------------------------------------------------------
 // All-time rankings
 // ---------------------------------------------------------------------------
-import { buildRankings, championOf, rankingKey, sortRankings, type RankingRow, type RankingTournament } from "./tournament";
+import { buildRankings, championOf, recordFor, rankingKey, sortRankings, type RankingRow, type RankingTournament } from "./tournament";
 
 const football2 = { slug: "football", name: "Football", category: "sport", allowsDraws: true, ptsWin: 3, ptsDraw: 1, ptsLoss: 0 };
 const fifa = { slug: "fifa", name: "FIFA", category: "esports", allowsDraws: true, ptsWin: 3, ptsDraw: 1, ptsLoss: 0 };
@@ -689,4 +689,119 @@ describe("sortRankings", () => {
     sortRankings(rows, "wins");
     expect(rows).toEqual(copy);
   });
+});
+
+describe("account-linked entrants", () => {
+  const ft = (id: string, a: string, b: string, h: number, aw: number) => ({
+    id, round: 1, group_label: null, home_id: a, away_id: b, home_score: h, away_score: aw, status: "finished" as const, next_match_id: null, next_slot: null,
+  });
+  const game = { slug: "fifa", name: "FIFA", category: "esports", allowsDraws: true, ptsWin: 3, ptsDraw: 1, ptsLoss: 0 };
+  const t = (id: string, parts: { id: string; name: string; user_id?: string | null }[], matches: ReturnType<typeof ft>[]) => ({
+    id, slug: id, name: id, status: "finished" as const, format: "round_robin" as const, game, participants: parts, matches,
+  });
+
+  it("merges one account across different spellings", () => {
+    const r = buildRankings([
+      t("t1", [{ id: "a", name: "@dari", user_id: "U1" }, { id: "b", name: "Ola" }], [ft("m1", "a", "b", 2, 0)]),
+      t("t2", [{ id: "c", name: "@dari_new", user_id: "U1" }, { id: "d", name: "Ola" }], [ft("m2", "c", "d", 1, 0)]),
+    ]);
+    const rows = r.games[0].rows;
+    expect(rows.filter((x) => x.name.startsWith("@"))).toHaveLength(1);
+    expect(rows.find((x) => x.key === "u:U1")).toMatchObject({ won: 2, tournaments: 2, titles: 2 });
+  });
+  it("keeps a plain name separate from an account with the same name", () => {
+    const r = buildRankings([
+      t("t1", [{ id: "a", name: "dari", user_id: "U1" }, { id: "b", name: "Ola" }], [ft("m1", "a", "b", 1, 0)]),
+      t("t2", [{ id: "c", name: "Dari" }, { id: "d", name: "Ola" }], [ft("m2", "c", "d", 1, 0)]),
+    ]);
+    expect(r.games[0].rows.filter((x) => x.name.toLowerCase() === "dari")).toHaveLength(2);
+  });
+  it("keeps two different accounts with the same display name apart", () => {
+    const r = buildRankings([
+      t("t1", [{ id: "a", name: "sam", user_id: "U1" }, { id: "b", name: "sam", user_id: "U2" }], [ft("m1", "a", "b", 3, 0)]),
+    ]);
+    expect(r.games[0].rows).toHaveLength(2);
+  });
+  it("accountUsername only accepts @ plus a valid username", async () => {
+    const { accountUsername } = await import("./tournament");
+    expect(accountUsername("@Dari_1")).toBe("dari_1");
+    expect(accountUsername("dari")).toBeNull();
+    expect(accountUsername("@ab")).toBeNull();
+    expect(accountUsername("@a b c")).toBeNull();
+    expect(accountUsername("@a-b-c")).toBeNull();
+  });
+});
+
+describe("recordFor", () => {
+  const ft = (id: string, a: string, b: string, h: number, aw: number) => ({
+    id, round: 1, group_label: null, home_id: a, away_id: b, home_score: h, away_score: aw, status: "finished" as const, next_match_id: null, next_slot: null,
+  });
+  const g = (slug: string, name: string) => ({ slug, name, category: "esports", allowsDraws: true, ptsWin: 3, ptsDraw: 1, ptsLoss: 0 });
+  const t = (id: string, game: ReturnType<typeof g>, parts: { id: string; name: string; user_id?: string | null }[], matches: ReturnType<typeof ft>[]) => ({
+    id, slug: id, name: id, status: "finished" as const, format: "round_robin" as const, game, participants: parts, matches,
+  });
+
+  it("lists the account in each game with rank, best first, and ignores other people", () => {
+    const { games } = buildRankings([
+      t("t1", g("fifa", "FIFA"), [{ id: "a", name: "@dari", user_id: "U1" }, { id: "b", name: "Ola", user_id: "U2" }], [ft("m1", "a", "b", 2, 0)]),
+      t("t2", g("cod", "Call of Duty"), [{ id: "c", name: "@dari", user_id: "U1" }, { id: "d", name: "Ola", user_id: "U2" }], [ft("m2", "c", "d", 0, 1)]),
+    ]);
+    const rec = recordFor(games, "U1");
+    expect(rec.map((r) => [r.game.slug, r.rank, r.of, r.row.titles])).toEqual([["fifa", 1, 2, 1], ["cod", 2, 2, 0]]);
+    expect(recordFor(games, "nobody")).toEqual([]);
+  });
+  it("does not pick up a plain name that happens to match", () => {
+    const { games } = buildRankings([
+      t("t1", g("fifa", "FIFA"), [{ id: "a", name: "dari" }, { id: "b", name: "Ola" }], [ft("m1", "a", "b", 2, 0)]),
+    ]);
+    expect(recordFor(games, "U1")).toEqual([]);
+  });
+});
+
+describe("linked usernames in rankings", () => {
+  const ft = (id: string, a: string, b: string, h: number, aw: number) => ({
+    id, round: 1, group_label: null, home_id: a, away_id: b, home_score: h, away_score: aw, status: "finished" as const, next_match_id: null, next_slot: null,
+  });
+  const game = { slug: "fifa", name: "FIFA", category: "esports", allowsDraws: true, ptsWin: 3, ptsDraw: 1, ptsLoss: 0 };
+  const t = (id: string, parts: { id: string; name: string; user_id?: string | null; username?: string | null }[], matches: ReturnType<typeof ft>[]) => ({
+    id, slug: id, name: id, status: "finished" as const, format: "round_robin" as const, game, participants: parts, matches,
+  });
+
+  it("shows the current username after a rename and exposes it for the player link", () => {
+    // t1 is newest (passed first): the account is now @dari_new; the older tournament still stored @dari
+    const r = buildRankings([
+      t("t1", [{ id: "a", name: "@dari_new", user_id: "U1", username: "dari_new" }, { id: "b", name: "Ola" }], [ft("m1", "a", "b", 1, 0)]),
+      t("t2", [{ id: "c", name: "@dari", user_id: "U1", username: "dari_new" }, { id: "d", name: "Ola" }], [ft("m2", "c", "d", 1, 0)]),
+    ]);
+    const row = r.games[0].rows.find((x) => x.key === "u:U1")!;
+    expect(row).toMatchObject({ name: "@dari_new", username: "dari_new", titles: 2 });
+    expect(r.champions.map((c) => [c.name, c.key])).toEqual([["@dari_new", "u:U1"], ["@dari_new", "u:U1"]]);
+  });
+  it("plain names carry no username", () => {
+    const r = buildRankings([t("t1", [{ id: "a", name: "Blessing" }, { id: "b", name: "Ola" }], [ft("m1", "a", "b", 1, 0)])]);
+    expect(r.games[0].rows[0].username).toBeUndefined();
+    expect(r.champions[0].key).toBe("blessing");
+  });
+});
+
+describe("link status in rankings", () => {
+  const ft = (id: string, a: string, b: string, h: number, aw: number) => ({
+    id, round: 1, group_label: null, home_id: a, away_id: b, home_score: h, away_score: aw, status: "finished" as const, next_match_id: null, next_slot: null,
+  });
+  const game = { slug: "fifa", name: "FIFA", category: "esports", allowsDraws: true, ptsWin: 3, ptsDraw: 1, ptsLoss: 0 };
+  const t = (parts: { id: string; name: string; user_id?: string | null; username?: string | null; link_status?: string | null }[]) => ({
+    id: "t", slug: "t", name: "t", status: "finished" as const, format: "round_robin" as const, game, participants: parts, matches: [ft("m", "a", "b", 1, 0)],
+  });
+  const rowsFor = (status: string) => buildRankings([t([{ id: "a", name: "@dari", user_id: "U1", username: "dari", link_status: status }, { id: "b", name: "Ola" }])]).games[0].rows;
+
+  it("counts an accepted link as the account", () => {
+    expect(rowsFor("accepted")[0]).toMatchObject({ key: "u:U1", username: "dari" });
+  });
+  for (const status of ["pending", "declined", "none"]) {
+    it(`treats a ${status} link as a plain name with no player page`, () => {
+      const row = rowsFor(status).find((r) => r.name === "@dari")!;
+      expect(row.key).toBe("@dari");
+      expect(row.username).toBeUndefined();
+    });
+  }
 });

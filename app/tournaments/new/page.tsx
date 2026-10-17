@@ -7,6 +7,7 @@ import { AnimatePresence, MotionConfig, motion } from "framer-motion";
 import {
   MAX_ADVANCE,
   MAX_GROUPS,
+  accountUsername,
   assignGroups,
   generateGroupStage,
   generateKnockout,
@@ -65,11 +66,16 @@ function parseNames(text: string) {
   const names: string[] = [];
   const repeated: string[] = [];
   const tooLong: string[] = [];
+  const badLinks: string[] = [];
   for (const raw of text.split(/[\n,;]+/)) {
     const name = raw.replace(/\s+/g, " ").trim();
     if (!name) continue;
     if (name.length > MAX_NAME) {
       tooLong.push(name);
+      continue;
+    }
+    if (name.startsWith("@") && accountUsername(name) === null) {
+      badLinks.push(name);
       continue;
     }
     const key = name.toLowerCase();
@@ -80,7 +86,7 @@ function parseNames(text: string) {
     seen.add(key);
     names.push(name);
   }
-  return { names, repeated, tooLong };
+  return { names, repeated, tooLong, badLinks };
 }
 
 /** Deterministic shuffle (mulberry32) so render stays pure; the random seed is picked in the click handler. */
@@ -195,6 +201,7 @@ export default function NewTournamentPage() {
     ordered.length >= 2 &&
       ordered.length <= MAX_ENTRANTS &&
       parsed.tooLong.length === 0 &&
+      parsed.badLinks.length === 0 &&
       (format !== "groups_knockout" || planProblem === null),
     orgChoice !== NEW_ORG || newOrgName.trim().length >= 2,
     true,
@@ -259,6 +266,25 @@ export default function NewTournamentPage() {
     setError(null);
     const sb = getSupabase();
 
+    // Entrants typed as @username are linked to that account. Check they all exist before saving anything.
+    const links = new Map<string, string>(); // lower-case username -> profile id
+    const wanted = [...new Set(ordered.map(accountUsername).filter((u): u is string => u !== null))];
+    if (wanted.length > 0) {
+      const found = await sb.from("profiles").select("id, username").in("username", wanted);
+      if (found.error) {
+        setError(`Couldn't check the @usernames: ${found.error.message}`);
+        setBusy(false);
+        return;
+      }
+      for (const row of (found.data ?? []) as { id: string; username: string }[]) links.set(row.username, row.id);
+      const missing = wanted.filter((u) => !links.has(u));
+      if (missing.length > 0) {
+        setError(`No account found for ${missing.map((u) => `@${u}`).join(", ")}. Check the spelling, or remove the @ to add a plain name.`);
+        setBusy(false);
+        return;
+      }
+    }
+
     // Ids are made here, not read back from the database, so no insert needs a RETURNING row.
     const tournamentId = crypto.randomUUID();
     try {
@@ -296,13 +322,23 @@ export default function NewTournamentPage() {
         if (error.code !== "23505" || attempt >= 2) throw error; // 23505 = slug already taken, try another
       }
 
-      const participants: { id: string; tournament_id: string; name: string; seed: number; group_label?: string }[] =
-        ordered.map((n, i) => ({
+      const participants: {
+        id: string;
+        tournament_id: string;
+        name: string;
+        seed: number;
+        user_id?: string;
+        group_label?: string;
+      }[] = ordered.map((n, i) => {
+        const username = accountUsername(n);
+        return {
           id: crypto.randomUUID(),
           tournament_id: tournamentId,
-          name: n,
+          name: username ? `@${username}` : n,
           seed: i + 1,
-        }));
+          ...(username ? { user_id: links.get(username) as string } : {}),
+        };
+      });
       const groupSplit = format === "groups_knockout" ? assignGroups(participants.map((x) => x.id), groupCount) : null;
       if (groupSplit) {
         for (const g of groupSplit) for (const id of g.ids) participants.find((x) => x.id === id)!.group_label = g.label;
@@ -569,7 +605,8 @@ export default function NewTournamentPage() {
           spellCheck={false}
         />
         <p className="mt-2 text-sm text-subtle">
-          You can paste a whole list from a chat or spreadsheet.
+          You can paste a whole list from a chat or spreadsheet. Type <span className="font-medium text-muted">@username</span> to
+          link someone&apos;s account. They get an invitation and their record follows them in the rankings once they accept.
           {format !== "round_robin" && ` The first name is the top seed. Shuffle at the end for a random draw.`}
         </p>
       </div>
@@ -596,6 +633,16 @@ export default function NewTournamentPage() {
 
       {parsed.repeated.length > 0 && (
         <p className="text-sm text-draw">Listed more than once, counted once: {parsed.repeated.join(", ")}</p>
+      )}
+      {ordered.some((n) => accountUsername(n) !== null) && (
+        <p className="text-sm text-muted">
+          Will be invited (accounts are checked when you create it): {ordered.filter((n) => accountUsername(n) !== null).join(", ")}
+        </p>
+      )}
+      {parsed.badLinks.length > 0 && (
+        <p role="alert" className="text-sm text-loss">
+          An @username is 3 to 20 letters, numbers or underscores: {parsed.badLinks.join(", ")}
+        </p>
       )}
       {parsed.tooLong.length > 0 && (
         <p role="alert" className="text-sm text-loss">

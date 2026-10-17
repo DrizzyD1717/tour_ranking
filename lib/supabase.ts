@@ -132,7 +132,7 @@ interface RankingRowRaw {
   status: Tournament["status"];
   format: Tournament["format"];
   game: Pick<Game, "slug" | "name" | "category" | "allows_draws" | "pts_win" | "pts_draw" | "pts_loss"> | null;
-  participants: { id: string; name: string }[] | null;
+  participants: { id: string; name: string; user_id: string | null; link_status: string; profile: { username: string } | null }[] | null;
   matches: (Pick<MatchRow, "id" | "round" | "group_label" | "home_id" | "away_id" | "home_score" | "away_score" | "status" | "next_match_id" | "next_slot">)[] | null;
 }
 
@@ -141,7 +141,7 @@ export async function listRankingTournaments(limit = 200): Promise<RankingTourna
   const { data, error } = await getSupabase()
     .from("tournaments")
     .select(
-      "id, slug, name, status, format, game:games(slug, name, category, allows_draws, pts_win, pts_draw, pts_loss), participants(id, name), matches(id, round, group_label, home_id, away_id, home_score, away_score, status, next_match_id, next_slot)",
+      "id, slug, name, status, format, game:games(slug, name, category, allows_draws, pts_win, pts_draw, pts_loss), participants(id, name, user_id, link_status, profile:profiles(username)), matches(id, round, group_label, home_id, away_id, home_score, away_score, status, next_match_id, next_slot)",
     )
     .eq("visibility", "public")
     .in("status", ["live", "finished"])
@@ -160,7 +160,7 @@ export async function listRankingTournaments(limit = 200): Promise<RankingTourna
         status: r.status,
         format: r.format,
         game: { slug: g.slug, name: g.name, category: g.category, allowsDraws: g.allows_draws, ptsWin: g.pts_win, ptsDraw: g.pts_draw, ptsLoss: g.pts_loss },
-        participants: r.participants ?? [],
+        participants: (r.participants ?? []).map((p) => ({ id: p.id, name: p.name, user_id: p.user_id, link_status: p.link_status, username: p.profile?.username ?? null })),
         matches: r.matches ?? [],
       };
     });
@@ -259,4 +259,63 @@ export async function listMyTournaments(userId: string): Promise<TournamentSumma
     .order("created_at", { ascending: false });
   if (error) throw new Error(error.message);
   return summarizeTournaments((data ?? []) as unknown as SummaryRow[]);
+}
+
+// ---------------------------------------------------------------------------
+// Link invitations: an organizer adds someone as @username; they accept or decline.
+// ---------------------------------------------------------------------------
+
+export interface LinkInvite {
+  participantId: string;
+  entrantName: string;
+  tournamentName: string;
+  tournamentSlug: string;
+  visibility: Tournament["visibility"];
+  organizer: string | null;
+}
+
+interface LinkRowRaw {
+  participant_id: string;
+  entrant_name: string;
+  tournament_name: string;
+  tournament_slug: string;
+  visibility: Tournament["visibility"];
+  organizer: string | null;
+}
+
+const toLink = (r: LinkRowRaw): LinkInvite => ({
+  participantId: r.participant_id,
+  entrantName: r.entrant_name,
+  tournamentName: r.tournament_name,
+  tournamentSlug: r.tournament_slug,
+  visibility: r.visibility,
+  organizer: r.organizer,
+});
+
+/** Open invitations for the signed-in person (including ones to private tournaments). Browser only. */
+export async function listMyInvites(): Promise<LinkInvite[]> {
+  const { data, error } = await getSupabase().rpc("my_link_invites");
+  if (error) throw new Error(error.message);
+  return ((data ?? []) as LinkRowRaw[]).map(toLink);
+}
+
+/** Tournaments the signed-in person is currently linked to (accepted links). Browser only. */
+export async function listMyLinks(): Promise<LinkInvite[]> {
+  const { data, error } = await getSupabase().rpc("my_links");
+  if (error) throw new Error(error.message);
+  return ((data ?? []) as LinkRowRaw[]).map(toLink);
+}
+
+/** Removes a link the person accepted. Returns an error message, or null when it was removed. */
+export async function unlinkMe(participantId: string): Promise<string | null> {
+  const { data, error } = await getSupabase().rpc("unlink_me", { pid: participantId });
+  if (error) return error.message;
+  return data === true ? null : "That link has already been removed.";
+}
+
+/** Returns an error message, or null when the answer was saved. */
+export async function respondToInvite(participantId: string, accept: boolean): Promise<string | null> {
+  const { data, error } = await getSupabase().rpc("respond_to_link", { pid: participantId, accept });
+  if (error) return error.message;
+  return data === true ? null : "That invitation is no longer open.";
 }

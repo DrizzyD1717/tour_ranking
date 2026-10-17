@@ -42,7 +42,16 @@ function Row({ row, rank, i, intro }: { row: RankingRow; rank: number; i: number
       <span className="flex min-w-0 items-center gap-3">
         <Crest name={row.name} />
         <span className="min-w-0">
-          <span className="block truncate text-[0.95rem] font-medium">{row.name}</span>
+          {row.username ? (
+            <Link
+              href={`/players/${row.username}`}
+              className="block truncate text-[0.95rem] font-medium underline-offset-4 hover:text-primary hover:underline"
+            >
+              {row.name}
+            </Link>
+          ) : (
+            <span className="block truncate text-[0.95rem] font-medium">{row.name}</span>
+          )}
           <span className="block truncate text-xs text-subtle">
             {row.tournaments} {row.tournaments === 1 ? "tournament" : "tournaments"}
           </span>
@@ -209,8 +218,8 @@ export default function RankingsBoard({
 
             <p className="mt-4 max-w-prose text-sm text-subtle">
               Only public tournaments count, across {game.tournaments} {game.tournaments === 1 ? "tournament" : "tournaments"} of{" "}
-              {game.name}. There are no accounts behind team and player names, so entrants with the same name are treated as
-              one. T is the number of tournaments entered.
+              {game.name}. Entrants added as @username are tracked by account; plain names are matched by name, so plain
+              entrants with the same name are treated as one. T is the number of tournaments entered.
             </p>
           </section>
         </div>

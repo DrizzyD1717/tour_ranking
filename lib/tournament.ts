@@ -628,15 +628,25 @@ export interface RankingTournament {
   status: "draft" | "live" | "finished";
   format: "round_robin" | "knockout" | "groups_knockout";
   game: { slug: string; name: string; category: string } & Pick<GameRules, "allowsDraws" | "ptsWin" | "ptsDraw" | "ptsLoss">;
-  participants: { id: Id; name: string }[];
+  /** `user_id` is set when the entrant is a real account; those are matched by account, not by name. */
+  participants: { id: Id; name: string; user_id?: Id | null; /** The account's current username, when linked. */ username?: string | null; /** Only "accepted" links count. Leave it out to treat a link as accepted. */ link_status?: string | null }[];
   matches: (BracketRow & { group_label: string | null })[];
 }
 
+/** An entrant typed as `@username` is linked to that account. Returns the username, or null for a plain name. */
+export const ACCOUNT_LINK = /^@([a-z0-9_]{3,20})$/i;
+export function accountUsername(entry: string): string | null {
+  const m = ACCOUNT_LINK.exec(entry.trim());
+  return m ? m[1].toLowerCase() : null;
+}
+
 export interface RankingRow {
-  /** The name with case and spacing ignored. Entrants with the same key are treated as one. */
+  /** Linked accounts are keyed by account id; everyone else by their name with case and spacing ignored. */
   key: string;
-  /** The spelling used most often. */
+  /** The spelling used most often. Linked accounts show as @username (their current one). */
   name: string;
+  /** Set for linked accounts: the current username, which the public player page is found by. */
+  username?: string;
   tournaments: number;
   played: number;
   won: number;
@@ -664,6 +674,8 @@ export interface Champion {
   tournament: string;
   game: string;
   name: string;
+  /** Same key as the ranking row, so a champion can be matched to an account (`u:<id>`) or a plain name. */
+  key: string;
 }
 
 export type RankingSort = "titles" | "wins" | "winRate";
@@ -686,9 +698,10 @@ export function championOf(t: RankingTournament): Id | null {
 }
 
 /**
- * Combines public tournaments into all-time tables, one per game. Entrants are matched by name
- * (ignoring case and extra spaces) because there are no accounts behind team or player names, so
- * two unrelated "Dari"s playing the same game will be counted as one. Only finished, fully scored,
+ * Combines public tournaments into all-time tables, one per game. Entrants linked to an account are
+ * matched by that account, so a renamed user stays one row and a plain name can never be mistaken for
+ * them. Everyone else is matched by name (ignoring case and extra spaces), so two unrelated "Dari"s
+ * playing the same game will be counted as one. Only finished, fully scored,
  * legal results count. `champions` follows the order the tournaments were passed in.
  */
 export function buildRankings(tournaments: RankingTournament[]): { games: GameRanking[]; champions: Champion[] } {
@@ -706,14 +719,18 @@ export function buildRankings(tournaments: RankingTournament[]): { games: GameRa
 
     const entrant = new Map<Id, Acc>();
     for (const p of t.participants) {
-      const key = rankingKey(p.name);
-      if (!key) continue;
+      // A link the person hasn't accepted (or has declined) is just a name.
+      const linked = Boolean(p.user_id) && (!p.link_status || p.link_status === "accepted");
+      const key = linked ? `u:${p.user_id}` : rankingKey(p.name);
+      if (!rankingKey(p.name)) continue;
+      const shown = linked && p.username ? `@${p.username}` : p.name.replace(/\s+/g, " ").trim();
       let row = g.rows.get(key);
       if (!row) {
-        row = { key, name: p.name.trim(), tournaments: 0, played: 0, won: 0, drawn: 0, lost: 0, for: 0, against: 0, diff: 0, titles: 0, winRate: 0, spellings: new Map(), seen: new Set() };
+        row = { key, name: shown, tournaments: 0, played: 0, won: 0, drawn: 0, lost: 0, for: 0, against: 0, diff: 0, titles: 0, winRate: 0, spellings: new Map(), seen: new Set() };
         g.rows.set(key, row);
       }
-      row.spellings.set(p.name.trim(), (row.spellings.get(p.name.trim()) ?? 0) + 1);
+      if (linked && p.username) row.username = p.username;
+      row.spellings.set(shown, (row.spellings.get(shown) ?? 0) + 1);
       entrant.set(p.id, row);
     }
 
@@ -745,7 +762,7 @@ export function buildRankings(tournaments: RankingTournament[]): { games: GameRa
       if (row) {
         row.titles++;
         row.seen.add(t.id);
-        champions.push({ tournamentId: t.id, slug: t.slug, tournament: t.name, game: t.game.name, name: row.name });
+        champions.push({ tournamentId: t.id, slug: t.slug, tournament: t.name, game: t.game.name, name: row.username ? `@${row.username}` : row.name, key: row.key });
         counted = true;
       }
     }
@@ -761,7 +778,7 @@ export function buildRankings(tournaments: RankingTournament[]): { games: GameRa
       let most = 0;
       for (const [spelling, n] of r.spellings) if (n > most) ((best = spelling), (most = n));
       list.push({
-        key: r.key, name: best, tournaments: r.seen.size, played: r.played, won: r.won, drawn: r.drawn, lost: r.lost,
+        key: r.key, name: r.username ? `@${r.username}` : best, ...(r.username ? { username: r.username } : {}), tournaments: r.seen.size, played: r.played, won: r.won, drawn: r.drawn, lost: r.lost,
         for: r.for, against: r.against, diff: r.for - r.against, titles: r.titles, winRate: r.played ? r.won / r.played : 0,
       });
     }
@@ -779,4 +796,23 @@ export function sortRankings(rows: RankingRow[], by: RankingSort): RankingRow[] 
     winRate: (a, b) => b.winRate - a.winRate || b.played - a.played || b.titles - a.titles,
   };
   return [...rows].sort((a, b) => order[by](a, b) || a.name.localeCompare(b.name));
+}
+
+export interface PersonalRecord {
+  game: { slug: string; name: string };
+  /** Position in that game's table (1 = top) out of `of` ranked entrants. */
+  rank: number;
+  of: number;
+  row: RankingRow;
+}
+
+/** One account's line in every game table it appears in, best-ranked first. Rankings must come from buildRankings. */
+export function recordFor(games: GameRanking[], userId: Id): PersonalRecord[] {
+  const key = `u:${userId}`;
+  const out: PersonalRecord[] = [];
+  for (const g of games) {
+    const i = g.rows.findIndex((r) => r.key === key);
+    if (i >= 0) out.push({ game: { slug: g.slug, name: g.name }, rank: i + 1, of: g.rows.length, row: g.rows[i] });
+  }
+  return out.sort((a, b) => a.rank / a.of - b.rank / b.of || b.row.titles - a.row.titles);
 }
