@@ -33,12 +33,13 @@ export default function TournamentBrowser({
   const [filter, setFilter] = useState<Filter>("all");
   const [query, setQuery] = useState("");
   const [limit, setLimit] = useState(PAGE);
+  const [showArchived, setShowArchived] = useState(false);
+  const archivedCount = tournaments.filter((t) => t.archived).length;
 
   // Search covers the tournament name and the game; the chip counts follow the search.
   const q = query.trim().toLowerCase();
-  const matching = q
-    ? tournaments.filter((t) => `${t.name} ${t.game.name}`.toLowerCase().includes(q))
-    : tournaments;
+  const visible = showArchived ? tournaments : tournaments.filter((t) => !t.archived);
+  const matching = q ? visible.filter((t) => `${t.name} ${t.game.name}`.toLowerCase().includes(q)) : visible;
   const matches = matching.filter((t) => filter === "all" || t.game.category === filter);
   const shown = matches.slice(0, limit);
   const count = (f: Filter) => matching.filter((t) => f === "all" || t.game.category === f).length;
@@ -61,7 +62,8 @@ export default function TournamentBrowser({
         />
       )}
 
-      <div className="mb-6 flex flex-wrap gap-2" role="group" aria-label="Filter by type">
+      <div className="mb-6 flex flex-wrap items-center gap-x-5 gap-y-3">
+      <div className="flex flex-wrap gap-2" role="group" aria-label="Filter by type">
         {FILTERS.map((f) => (
           <button
             key={f.id}
@@ -81,11 +83,28 @@ export default function TournamentBrowser({
           </button>
         ))}
       </div>
+      {archivedCount > 0 && (
+        <label className="flex cursor-pointer items-center gap-2 text-sm text-muted">
+          <input
+            type="checkbox"
+            checked={showArchived}
+            onChange={(e) => {
+              setShowArchived(e.target.checked);
+              setLimit(PAGE);
+            }}
+            className="size-4 accent-primary"
+          />
+          Show archived ({archivedCount})
+        </label>
+      )}
+      </div>
 
       {shown.length === 0 ? (
         <p className="rounded-2xl border border-dashed border-border-strong px-6 py-12 text-center text-muted">
           {tournaments.length === 0
             ? emptyText
+            : visible.length === 0
+              ? "Everything here is archived. Use Show archived to see it."
             : q
               ? `No tournaments match "${query.trim()}".`
               : "Nothing in this category yet."}
@@ -120,6 +139,11 @@ export default function TournamentBrowser({
                   {t.status === "finished" && (
                     <span className="rounded-full bg-surface-sunken px-2.5 py-1 text-xs font-bold uppercase tracking-wide text-muted">
                       Finished
+                    </span>
+                  )}
+                  {t.archived && (
+                    <span className="rounded-full border border-border-strong px-2.5 py-1 text-xs font-semibold text-muted">
+                      Archived
                     </span>
                   )}
                   {t.visibility && t.visibility !== "public" && (

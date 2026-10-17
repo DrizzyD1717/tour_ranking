@@ -1,5 +1,5 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import type { RankingTournament } from "./tournament";
+import { isArchived, type ArchiveMode, type RankingTournament } from "./tournament";
 
 // ---------------------------------------------------------------------------
 // Types (mirror supabase/schema.sql; replace with generated types later if you like)
@@ -28,6 +28,9 @@ export interface Tournament {
   status: "draft" | "live" | "finished";
   visibility: "public" | "unlisted" | "private";
   starts_at: string | null;
+  /** Archiving: see isArchived(). Absent on demo tournaments. */
+  archive_mode?: ArchiveMode;
+  finished_at?: string | null;
   game: Game;
 }
 
@@ -96,7 +99,7 @@ export async function getTournamentBundle(slug: string): Promise<TournamentBundl
   const { data: tournament, error } = await sb
     .from("tournaments")
     .select(
-      "id, slug, name, format, double_round, advance_per_group, status, visibility, starts_at, game:games(id, slug, name, category, score_label, allows_draws, pts_win, pts_draw, pts_loss)",
+      "id, slug, name, format, double_round, advance_per_group, status, visibility, starts_at, archive_mode, finished_at, game:games(id, slug, name, category, score_label, allows_draws, pts_win, pts_draw, pts_loss)",
     )
     .eq("slug", slug)
     .maybeSingle();
@@ -181,6 +184,8 @@ export interface TournamentSummary {
   format: Tournament["format"];
   createdAt: string;
   visibility?: Tournament["visibility"];
+  /** Left the home list (a day after finishing, or archived by the organizer). Still has its page and rankings. */
+  archived: boolean;
   game: { name: string; slug: string; category: Game["category"] };
   /** Teams or players entered. */
   entrants: number;
@@ -196,13 +201,15 @@ interface SummaryRow {
   format: Tournament["format"];
   created_at: string;
   visibility?: Tournament["visibility"];
+  archive_mode?: ArchiveMode;
+  finished_at?: string | null;
   game: { name: string; slug: string; category: Game["category"] } | null;
   participants: { count: number }[] | null;
   matches: { status: MatchRow["status"] }[] | null;
 }
 
 /** Turns the raw database rows into what the home page shows. Live tournaments come first, then newest. */
-export function summarizeTournaments(rows: SummaryRow[]): TournamentSummary[] {
+export function summarizeTournaments(rows: SummaryRow[], now: number = Date.now()): TournamentSummary[] {
   return rows
     .filter((r) => r.game)
     .map((r) => {
@@ -215,6 +222,7 @@ export function summarizeTournaments(rows: SummaryRow[]): TournamentSummary[] {
         format: r.format,
         createdAt: r.created_at,
         visibility: r.visibility,
+        archived: isArchived({ archive_mode: r.archive_mode, status: r.status, finished_at: r.finished_at }, now),
         game: r.game as TournamentSummary["game"],
         entrants: r.participants?.[0]?.count ?? 0,
         played: matches.filter((m) => m.status === "finished").length,
@@ -232,7 +240,7 @@ export async function listPublicTournaments(limit = 200): Promise<TournamentSumm
   const { data, error } = await getSupabase()
     .from("tournaments")
     .select(
-      "id, slug, name, status, format, created_at, game:games(name, slug, category), participants(count), matches(status)",
+      "id, slug, name, status, format, created_at, archive_mode, finished_at, game:games(name, slug, category), participants(count), matches(status)",
     )
     .eq("visibility", "public")
     .order("created_at", { ascending: false })
@@ -256,7 +264,7 @@ export async function listMyTournaments(userId: string): Promise<TournamentSumma
   const { data, error } = await sb
     .from("tournaments")
     .select(
-      "id, slug, name, status, format, visibility, created_at, game:games(name, slug, category), participants(count), matches(status)",
+      "id, slug, name, status, format, visibility, created_at, archive_mode, finished_at, game:games(name, slug, category), participants(count), matches(status)",
     )
     .in("id", ids)
     .order("created_at", { ascending: false });

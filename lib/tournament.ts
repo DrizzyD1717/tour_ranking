@@ -816,3 +816,31 @@ export function recordFor(games: GameRanking[], userId: Id): PersonalRecord[] {
   }
   return out.sort((a, b) => a.rank / a.of - b.rank / b.of || b.row.titles - a.row.titles);
 }
+
+// ---------------------------------------------------------------------------
+// Archiving
+// ---------------------------------------------------------------------------
+
+/** 'auto' archives a day after the tournament finishes; 'archived' archives now; 'pinned' never auto-archives. */
+export type ArchiveMode = "auto" | "archived" | "pinned";
+
+export const ARCHIVE_AFTER_MS = 24 * 60 * 60 * 1000;
+
+/** The moment an 'auto' tournament becomes archived, or null if it isn't going to be (not finished, or not 'auto'). */
+export function archiveDueAt(t: { archive_mode?: ArchiveMode | null; status: string; finished_at?: string | null }): Date | null {
+  if ((t.archive_mode ?? "auto") !== "auto" || t.status !== "finished" || !t.finished_at) return null;
+  const at = new Date(t.finished_at).getTime();
+  return Number.isNaN(at) ? null : new Date(at + ARCHIVE_AFTER_MS);
+}
+
+/** Archived tournaments leave the home list but keep their page, rankings and records. */
+export function isArchived(
+  t: { archive_mode?: ArchiveMode | null; status: string; finished_at?: string | null },
+  now: number = Date.now(),
+): boolean {
+  const mode = t.archive_mode ?? "auto";
+  if (mode === "archived") return true;
+  if (mode === "pinned") return false;
+  const due = archiveDueAt(t);
+  return due !== null && now >= due.getTime();
+}

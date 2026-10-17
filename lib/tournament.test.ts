@@ -805,3 +805,56 @@ describe("link status in rankings", () => {
     });
   }
 });
+
+describe("archiving", () => {
+  const HOUR = 3600_000;
+  const finishedAt = "2026-10-10T12:00:00.000Z";
+  const t0 = new Date(finishedAt).getTime();
+  const fin = { status: "finished", finished_at: finishedAt };
+
+  it("auto: not archived until 24 hours after finishing, then archived", async () => {
+    const { isArchived } = await import("./tournament");
+    expect(isArchived({ ...fin, archive_mode: "auto" }, t0)).toBe(false);
+    expect(isArchived({ ...fin, archive_mode: "auto" }, t0 + 24 * HOUR - 1)).toBe(false);
+    expect(isArchived({ ...fin, archive_mode: "auto" }, t0 + 24 * HOUR)).toBe(true);
+    expect(isArchived({ ...fin, archive_mode: "auto" }, t0 + 30 * 24 * HOUR)).toBe(true);
+  });
+  it("a missing mode means auto", async () => {
+    const { isArchived } = await import("./tournament");
+    expect(isArchived(fin, t0 + 25 * HOUR)).toBe(true);
+    expect(isArchived({ ...fin, archive_mode: null }, t0 + 25 * HOUR)).toBe(true);
+  });
+  it("live, draft and not-yet-stamped tournaments never auto-archive", async () => {
+    const { isArchived } = await import("./tournament");
+    const late = t0 + 1000 * HOUR;
+    expect(isArchived({ status: "live", finished_at: null, archive_mode: "auto" }, late)).toBe(false);
+    expect(isArchived({ status: "draft", finished_at: null }, late)).toBe(false);
+    expect(isArchived({ status: "finished", finished_at: null }, late)).toBe(false);
+    expect(isArchived({ status: "finished", finished_at: "not a date" }, late)).toBe(false);
+  });
+  it("archived always archives (even live); pinned never does", async () => {
+    const { isArchived } = await import("./tournament");
+    const late = t0 + 1000 * HOUR;
+    expect(isArchived({ status: "live", archive_mode: "archived" }, t0)).toBe(true);
+    expect(isArchived({ ...fin, archive_mode: "pinned" }, late)).toBe(false);
+  });
+  it("archiveDueAt gives the moment, and null when nothing is scheduled", async () => {
+    const { archiveDueAt } = await import("./tournament");
+    expect(archiveDueAt({ ...fin, archive_mode: "auto" })?.toISOString()).toBe("2026-10-11T12:00:00.000Z");
+    expect(archiveDueAt({ ...fin, archive_mode: "pinned" })).toBeNull();
+    expect(archiveDueAt({ ...fin, archive_mode: "archived" })).toBeNull();
+    expect(archiveDueAt({ status: "live", archive_mode: "auto" })).toBeNull();
+  });
+  it("summaries carry the archived flag", async () => {
+    const { summarizeTournaments } = await import("./supabase");
+    const base = { id: "1", slug: "a", name: "A", format: "knockout" as const, created_at: "", game: { name: "FIFA", slug: "fifa", category: "esports" as const }, participants: [{ count: 4 }], matches: [] };
+    const rows = [
+      { ...base, id: "old", status: "finished" as const, finished_at: finishedAt, archive_mode: "auto" as const },
+      { ...base, id: "new", status: "finished" as const, finished_at: finishedAt, archive_mode: "auto" as const },
+      { ...base, id: "live", status: "live" as const },
+    ];
+    const out = summarizeTournaments(rows, t0 + 25 * HOUR);
+    expect(out.map((s) => [s.id, s.archived]).sort()).toEqual([["live", false], ["new", true], ["old", true]]);
+    expect(summarizeTournaments([rows[0]], t0 + HOUR)[0].archived).toBe(false);
+  });
+});

@@ -418,3 +418,36 @@ grant execute on function public.my_links() to authenticated;
 -- ============================================================================
 create unique index if not exists participants_one_entry_per_account
   on public.participants (tournament_id, user_id) where user_id is not null;
+
+-- ============================================================================
+-- Archive (same as supabase/008_archive.sql)
+-- Archived tournaments leave the home list but keep their page and rankings. archive_mode:
+--   'auto' archives 24 hours after finishing, 'archived' archives now, 'pinned' never auto-archives.
+-- ============================================================================
+alter table public.tournaments
+  add column if not exists archive_mode text not null default 'auto'
+  check (archive_mode in ('auto', 'archived', 'pinned'));
+alter table public.tournaments add column if not exists finished_at timestamptz;
+
+-- Tournaments already finished get a fresh 24 hours before they auto-archive.
+update public.tournaments set finished_at = now() where status = 'finished' and finished_at is null;
+
+-- finished_at is always worked out here, never taken from the client: set when the tournament
+-- finishes, cleared if it is reopened, untouched otherwise.
+create or replace function public.tournaments_finished_at() returns trigger
+language plpgsql as $$
+begin
+  if new.status <> 'finished' then
+    new.finished_at := null;
+  elsif tg_op = 'INSERT' or old.status is distinct from 'finished' then
+    new.finished_at := now();
+  else
+    new.finished_at := old.finished_at;
+  end if;
+  return new;
+end $$;
+
+drop trigger if exists tournaments_finished_at on public.tournaments;
+create trigger tournaments_finished_at
+  before insert or update on public.tournaments
+  for each row execute function public.tournaments_finished_at();

@@ -7,6 +7,9 @@ import { AnimatePresence, MotionConfig, animate, motion, useMotionValue, useTran
 import {
   accountUsername,
   advanceKnockout,
+  archiveDueAt,
+  isArchived,
+  type ArchiveMode,
   computeStandings,
   generateKnockout,
   knockoutWinner,
@@ -1135,6 +1138,73 @@ function KnockoutStagePanel({
   );
 }
 
+const ARCHIVE_OPTIONS: { id: ArchiveMode; label: string; hint: string }[] = [
+  { id: "auto", label: "Automatic", hint: "Archived a day after it finishes." },
+  { id: "archived", label: "Archive now", hint: "Off the home list straight away." },
+  { id: "pinned", label: "Keep active", hint: "Never archived automatically." },
+];
+
+/** Archived tournaments leave the home list but keep their page, their rankings and everyone's record. */
+function ArchivePanel({
+  mode,
+  archived,
+  due,
+  onChange,
+}: {
+  mode: ArchiveMode;
+  archived: boolean;
+  due: Date | null;
+  onChange: (next: ArchiveMode) => Promise<string | null>;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<Notice | null>(null);
+
+  async function choose(next: ArchiveMode) {
+    if (next === mode || busy) return;
+    setBusy(true);
+    setNotice(null);
+    const error = await onChange(next);
+    setBusy(false);
+    setNotice(error ? { kind: "error", text: error } : { kind: "ok", text: "Saved." });
+  }
+
+  return (
+    <section aria-labelledby="archive-h" className="p-5 sm:p-6">
+      <h3 id="archive-h" className="font-display text-2xl font-bold">
+        Archive
+      </h3>
+      <p className="mt-1 text-muted">
+        {archived
+          ? "This tournament is archived. It's off the home list, but its page still works and it still counts in rankings."
+          : mode === "pinned"
+            ? "This tournament stays on the home list."
+            : due
+              ? `It will be archived on ${due.toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}.`
+              : "It will be archived a day after it finishes."}
+      </p>
+      <div role="radiogroup" aria-labelledby="archive-h" className="mt-4 grid gap-3 sm:grid-cols-3">
+        {ARCHIVE_OPTIONS.map((o) => (
+          <button
+            key={o.id}
+            type="button"
+            role="radio"
+            aria-checked={o.id === mode}
+            disabled={busy}
+            onClick={() => choose(o.id)}
+            className={`cursor-pointer rounded-2xl border p-4 text-left transition disabled:cursor-not-allowed disabled:opacity-60 ${
+              o.id === mode ? "border-primary bg-primary/5" : "border-border bg-surface hover:border-border-strong"
+            }`}
+          >
+            <span className="block font-display text-xl font-bold">{o.label}</span>
+            <span className="mt-1 block text-sm text-muted">{o.hint}</span>
+          </button>
+        ))}
+      </div>
+      <NoticeLine notice={notice} />
+    </section>
+  );
+}
+
 /** Permanent delete, behind a typed confirmation so it can't happen by a stray click. */
 function DeletePanel({ name, onDelete }: { name: string; onDelete: () => Promise<string | null> }) {
   const [open, setOpen] = useState(false);
@@ -1456,9 +1526,11 @@ function ManagePanel({
   participants,
   onParticipantChange,
   onDelete,
+  archive,
   extra,
 }: {
   demo: boolean;
+  archive: { mode: ArchiveMode; archived: boolean; due: Date | null; onChange: (next: ArchiveMode) => Promise<string | null> };
   onDelete: () => Promise<string | null>;
   participants: ParticipantRow[];
   onParticipantChange: (row: ParticipantRow) => void;
@@ -1479,6 +1551,7 @@ function ManagePanel({
       <ScorekeepersPanel demo={demo} tournamentId={tournament.id} />
       {!demo && <EntrantsPanel participants={participants} onChange={onParticipantChange} />}
       {extra}
+      {!demo && <ArchivePanel {...archive} />}
       {!demo && <DeletePanel name={tournament.name} onDelete={onDelete} />}
       <FinishPanel status={status} unplayed={unplayed} total={total} leaderName={leaderName} onChangeStatus={onChangeStatus} />
     </div>
@@ -1566,6 +1639,8 @@ export default function TournamentView({ initial, demo }: { initial: TournamentB
   );
   const [status, setStatus] = useState<Tournament["status"]>(tournament.status);
   const [visibility, setVisibility] = useState<Tournament["visibility"]>(tournament.visibility);
+  const [archiveMode, setArchiveMode] = useState<ArchiveMode>(tournament.archive_mode ?? "auto");
+  const [finishedAt, setFinishedAt] = useState<string | null>(tournament.finished_at ?? null);
   const [mounted, setMounted] = useState(false);
   const intro = useRef(true);
 
@@ -1843,6 +1918,23 @@ export default function TournamentView({ initial, demo }: { initial: TournamentB
 
   const router = useRouter();
 
+  // The database stamps finished_at when a tournament finishes; mirror that here so the page agrees
+  // without a reload (a tournament finished a moment ago is not archived yet).
+  useEffect(() => {
+    setFinishedAt((f) => (status === "finished" ? (f ?? new Date().toISOString()) : null));
+  }, [status]);
+  const archiveInfo = { archive_mode: archiveMode, status, finished_at: finishedAt };
+  const archived = isArchived(archiveInfo);
+  const archiveDue = archiveDueAt(archiveInfo);
+
+  async function changeArchiveMode(next: ArchiveMode): Promise<string | null> {
+    const { data, error } = await getSupabase().from("tournaments").update({ archive_mode: next }).eq("id", tournament.id).select("id");
+    if (error) return error.message;
+    if (!data || data.length === 0) return "Couldn't change it. Only the organizer can do that.";
+    setArchiveMode(next);
+    return null;
+  }
+
   /** Deletes the tournament and everything in it. Returns an error message, or null after leaving the page. */
   async function deleteTournament(): Promise<string | null> {
     const { data, error } = await getSupabase().from("tournaments").delete().eq("id", tournament.id).select("id");
@@ -1885,6 +1977,9 @@ export default function TournamentView({ initial, demo }: { initial: TournamentB
             )}
             {status === "finished" && (
               <span className="rounded-full border border-border bg-surface-raised px-3 py-1 text-muted">Finished</span>
+            )}
+            {archived && (
+              <span className="rounded-full border border-border bg-surface-raised px-3 py-1 text-muted">Archived</span>
             )}
             {visibility !== "public" && (
               <span className="rounded-full border border-border bg-surface-raised px-3 py-1 text-muted">
@@ -2071,6 +2166,7 @@ export default function TournamentView({ initial, demo }: { initial: TournamentB
                 onChangeVisibility={changeVisibility}
                 participants={participants}
                 onDelete={deleteTournament}
+                archive={{ mode: archiveMode, archived, due: archiveDue, onChange: changeArchiveMode }}
                 onParticipantChange={(row) => setParticipants((ps) => ps.map((p) => (p.id === row.id ? { ...p, ...row } : p)))}
                 extra={
                   isGroups ? (
