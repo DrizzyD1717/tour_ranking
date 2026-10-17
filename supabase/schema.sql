@@ -412,3 +412,9 @@ revoke all on function public.unlink_me(uuid) from public;
 revoke all on function public.my_links() from public;
 grant execute on function public.unlink_me(uuid) to authenticated;
 grant execute on function public.my_links() to authenticated;
+
+-- ============================================================================
+-- One entry per account (same as supabase/007_one_entry_per_account.sql)
+-- ============================================================================
+create unique index if not exists participants_one_entry_per_account
+  on public.participants (tournament_id, user_id) where user_id is not null;

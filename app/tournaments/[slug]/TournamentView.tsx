@@ -2,8 +2,10 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { AnimatePresence, MotionConfig, animate, motion, useMotionValue, useTransform } from "framer-motion";
 import {
+  accountUsername,
   advanceKnockout,
   computeStandings,
   generateKnockout,
@@ -1133,6 +1135,236 @@ function KnockoutStagePanel({
   );
 }
 
+/** Permanent delete, behind a typed confirmation so it can't happen by a stray click. */
+function DeletePanel({ name, onDelete }: { name: string; onDelete: () => Promise<string | null> }) {
+  const [open, setOpen] = useState(false);
+  const [typed, setTyped] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const matches = typed.trim() === name.trim();
+
+  async function confirm() {
+    if (!matches || busy) return;
+    setBusy(true);
+    setError(null);
+    const problem = await onDelete();
+    if (problem) {
+      setError(problem);
+      setBusy(false);
+    }
+    // On success the page navigates away, so there is nothing to reset.
+  }
+
+  return (
+    <section aria-labelledby="delete-h" className="p-5 sm:p-6">
+      <h3 id="delete-h" className="font-display text-2xl font-bold text-loss">
+        Delete tournament
+      </h3>
+      <p className="mt-1 text-muted">
+        Removes the tournament, its fixtures, scores and entrants for everyone. Rankings and player records change too. This
+        can&apos;t be undone.
+      </p>
+      {!open ? (
+        <button type="button" onClick={() => setOpen(true)} className={`${SMALL_BTN} mt-4 !border-loss/50 text-loss`}>
+          Delete this tournament…
+        </button>
+      ) : (
+        <form
+          className="mt-4 space-y-3 rounded-2xl border border-loss/40 bg-loss/10 p-4"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void confirm();
+          }}
+        >
+          <label htmlFor="delete-confirm" className="block text-sm">
+            Type <span className="font-semibold">{name}</span> to confirm.
+          </label>
+          <input
+            id="delete-confirm"
+            autoFocus
+            autoComplete="off"
+            value={typed}
+            onChange={(e) => setTyped(e.target.value)}
+            className={FIELD}
+          />
+          {error && (
+            <p role="alert" className="text-sm text-loss">
+              {error}
+            </p>
+          )}
+          <div className="flex gap-2">
+            <button type="submit" disabled={!matches || busy} className={`${PRIMARY_BTN} !bg-loss !text-white`}>
+              {busy ? "Deleting..." : "Delete forever"}
+            </button>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => {
+                setOpen(false);
+                setTyped("");
+                setError(null);
+              }}
+              className={SMALL_BTN}
+            >
+              Cancel
+            </button>
+          </div>
+        </form>
+      )}
+    </section>
+  );
+}
+
+const ENTRANT_COLUMNS = "id, tournament_id, name, group_label, seed, user_id, link_status";
+const LINK_LABEL = { pending: "Invitation pending", accepted: "Linked", declined: "Declined the link" } as const;
+
+/**
+ * The organizer can fix entrants after creating the tournament: rename a plain entrant, link one to an
+ * account (the person is invited and must accept), or remove a link. A declined link can be re-sent.
+ */
+function EntrantsPanel({ participants, onChange }: { participants: ParticipantRow[]; onChange: (row: ParticipantRow) => void }) {
+  const [editing, setEditing] = useState<{ id: string; mode: "rename" | "link"; value: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<Notice | null>(null);
+
+  /** Saves a change and returns the stored row (with the status the database decided), or an error message. */
+  async function save(id: string, patch: Record<string, unknown>): Promise<{ row: ParticipantRow } | { error: string }> {
+    const { data, error } = await getSupabase().from("participants").update(patch).eq("id", id).select(ENTRANT_COLUMNS);
+    if (error) {
+      if (error.code !== "23505") return { error: error.message };
+      return { error: /account/.test(error.message) ? "That account is already in this tournament." : "Another entrant already has that name." };
+    }
+    if (!data || data.length === 0) return { error: "Couldn't save. Only the organizer can edit entrants." };
+    return { row: data[0] as ParticipantRow };
+  }
+
+  async function run(job: () => Promise<{ row: ParticipantRow } | { error: string }>, ok: string) {
+    setBusy(true);
+    setNotice(null);
+    const result = await job();
+    setBusy(false);
+    if ("error" in result) {
+      setNotice({ kind: "error", text: result.error });
+      return;
+    }
+    onChange(result.row);
+    setEditing(null);
+    setNotice({ kind: "ok", text: ok });
+  }
+
+  function rename(p: ParticipantRow, raw: string) {
+    const name = raw.replace(/\s+/g, " ").trim();
+    if (name.length < 1 || name.length > 40) return setNotice({ kind: "error", text: "A name is 1 to 40 characters." });
+    if (name.startsWith("@")) return setNotice({ kind: "error", text: "Names can't start with @. Use Link account to link a person." });
+    void run(() => save(p.id, { name }), `Renamed to ${name}.`);
+  }
+
+  function link(p: ParticipantRow, raw: string) {
+    const username = accountUsername(raw.trim().startsWith("@") ? raw : `@${raw.trim()}`);
+    if (!username) return setNotice({ kind: "error", text: "An @username is 3 to 20 letters, numbers or underscores." });
+    void run(async () => {
+      const found = await getSupabase().from("profiles").select("id, username").eq("username", username).maybeSingle();
+      if (found.error) return { error: found.error.message };
+      const person = found.data as { id: string } | null;
+      if (!person) return { error: `No account found for @${username}.` };
+      const dupe = participants.find((x) => x.user_id === person.id && x.id !== p.id);
+      if (dupe) return { error: `@${username} is already in this tournament${dupe.name === `@${username}` ? "" : ` as ${dupe.name}`}.` };
+      return save(p.id, { user_id: person.id, name: `@${username}` });
+    }, `Invitation sent to @${username}. Their results count once they accept.`);
+  }
+
+  function unlink(p: ParticipantRow) {
+    void run(() => save(p.id, { user_id: null }), `${p.name} is now a plain name. You can rename it.`);
+  }
+
+  function reinvite(p: ParticipantRow) {
+    const uid = p.user_id;
+    if (!uid) return;
+    // Unlinking and linking again is what asks the person a second time.
+    void run(async () => {
+      const cleared = await save(p.id, { user_id: null });
+      if ("error" in cleared) return cleared;
+      return save(p.id, { user_id: uid });
+    }, `Invitation sent again to ${p.name}.`);
+  }
+
+  return (
+    <section aria-labelledby="entrants-h" className="p-5 sm:p-6">
+      <h3 id="entrants-h" className="font-display text-2xl font-bold">
+        Entrants
+      </h3>
+      <p className="mt-1 text-muted">Fix a spelling, or link someone to their account so their record follows them.</p>
+      <ul className="mt-4 divide-y divide-border rounded-2xl border border-border">
+        {participants.map((p) => {
+          const label = p.user_id && p.link_status && p.link_status !== "none" ? LINK_LABEL[p.link_status] : null;
+          const open = editing?.id === p.id ? editing : null;
+          return (
+            <li key={p.id} className="px-4 py-3">
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+                <span className="min-w-0 flex-1 truncate font-medium">{p.name}</span>
+                {label && (
+                  <span className="rounded-full border border-border-strong px-2.5 py-0.5 text-xs text-muted">{label}</span>
+                )}
+                {!open && (
+                  <span className="flex flex-wrap gap-2">
+                    {!p.user_id && (
+                      <button type="button" disabled={busy} onClick={() => setEditing({ id: p.id, mode: "rename", value: p.name })} aria-label={`Rename ${p.name}`} className={SMALL_BTN}>
+                        Rename
+                      </button>
+                    )}
+                    <button type="button" disabled={busy} onClick={() => setEditing({ id: p.id, mode: "link", value: "" })} aria-label={p.user_id ? `Change account for ${p.name}` : `Link ${p.name} to an account`} className={SMALL_BTN}>
+                      {p.user_id ? "Change account" : "Link account"}
+                    </button>
+                    {p.link_status === "declined" && (
+                      <button type="button" disabled={busy} onClick={() => reinvite(p)} aria-label={`Invite ${p.name} again`} className={SMALL_BTN}>
+                        Invite again
+                      </button>
+                    )}
+                    {p.user_id && (
+                      <button type="button" disabled={busy} onClick={() => unlink(p)} aria-label={`Remove link from ${p.name}`} className={SMALL_BTN}>
+                        Remove link
+                      </button>
+                    )}
+                  </span>
+                )}
+              </div>
+              {open && (
+                <form
+                  className="mt-3 flex flex-col gap-2 sm:flex-row"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    if (open.mode === "rename") rename(p, open.value);
+                    else link(p, open.value);
+                  }}
+                >
+                  <input
+                    autoFocus
+                    value={open.value}
+                    onChange={(e) => setEditing({ ...open, value: e.target.value })}
+                    aria-label={open.mode === "rename" ? `New name for ${p.name}` : `Username to link to ${p.name}`}
+                    placeholder={open.mode === "rename" ? "New name" : "@username"}
+                    maxLength={40}
+                    className={FIELD}
+                  />
+                  <span className="flex gap-2">
+                    <button type="submit" disabled={busy} className={`${PRIMARY_BTN} py-3`}>
+                      {open.mode === "rename" ? "Save" : "Send invitation"}
+                    </button>
+                    <button type="button" disabled={busy} onClick={() => setEditing(null)} className={`${SMALL_BTN} py-3`}>
+                      Cancel
+                    </button>
+                  </span>
+                </form>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+      <NoticeLine notice={notice} />
+    </section>
+  );
+}
+
 const VISIBILITY_OPTIONS: { id: Tournament["visibility"]; label: string; hint: string }[] = [
   { id: "public", label: "Public", hint: "Listed on the site and in rankings." },
   { id: "unlisted", label: "Link only", hint: "Not listed. Anyone with the link can follow it." },
@@ -1221,9 +1453,15 @@ function ManagePanel({
   onChangeStatus,
   visibility,
   onChangeVisibility,
+  participants,
+  onParticipantChange,
+  onDelete,
   extra,
 }: {
   demo: boolean;
+  onDelete: () => Promise<string | null>;
+  participants: ParticipantRow[];
+  onParticipantChange: (row: ParticipantRow) => void;
   tournament: Tournament;
   visibility: Tournament["visibility"];
   onChangeVisibility: (next: Tournament["visibility"]) => Promise<string | null>;
@@ -1239,7 +1477,9 @@ function ManagePanel({
       <SharePanel slug={tournament.slug} visibility={visibility} />
       <VisibilityPanel visibility={visibility} onChange={onChangeVisibility} />
       <ScorekeepersPanel demo={demo} tournamentId={tournament.id} />
+      {!demo && <EntrantsPanel participants={participants} onChange={onParticipantChange} />}
       {extra}
+      {!demo && <DeletePanel name={tournament.name} onDelete={onDelete} />}
       <FinishPanel status={status} unplayed={unplayed} total={total} leaderName={leaderName} onChangeStatus={onChangeStatus} />
     </div>
   );
@@ -1315,7 +1555,8 @@ export function TournamentGate({ slug }: { slug: string }) {
 }
 
 export default function TournamentView({ initial, demo }: { initial: TournamentBundle; demo: boolean }) {
-  const { tournament, participants } = initial;
+  const { tournament } = initial;
+  const [participants, setParticipants] = useState<ParticipantRow[]>(initial.participants);
   const game = tournament.game;
 
   const [matches, setMatches] = useState<MatchRow[]>(initial.matches);
@@ -1600,6 +1841,17 @@ export default function TournamentView({ initial, demo }: { initial: TournamentB
     mirrorFinal(next, patch);
   }
 
+  const router = useRouter();
+
+  /** Deletes the tournament and everything in it. Returns an error message, or null after leaving the page. */
+  async function deleteTournament(): Promise<string | null> {
+    const { data, error } = await getSupabase().from("tournaments").delete().eq("id", tournament.id).select("id");
+    if (error) return error.message;
+    if (!data || data.length === 0) return "Couldn't delete it. Only the organizer can do that.";
+    router.push("/my-tournaments");
+    return null;
+  }
+
   async function changeVisibility(next: Tournament["visibility"]): Promise<string | null> {
     if (demo) {
       setVisibility(next);
@@ -1817,6 +2069,9 @@ export default function TournamentView({ initial, demo }: { initial: TournamentB
                 onChangeStatus={changeStatus}
                 visibility={visibility}
                 onChangeVisibility={changeVisibility}
+                participants={participants}
+                onDelete={deleteTournament}
+                onParticipantChange={(row) => setParticipants((ps) => ps.map((p) => (p.id === row.id ? { ...p, ...row } : p)))}
                 extra={
                   isGroups ? (
                     <KnockoutStagePanel

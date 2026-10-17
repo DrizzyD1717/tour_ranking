@@ -37,6 +37,9 @@ export interface ParticipantRow {
   name: string;
   group_label: string | null;
   seed: number | null;
+  /** The linked account, and whether that person accepted (none / pending / accepted / declined). */
+  user_id?: string | null;
+  link_status?: "none" | "pending" | "accepted" | "declined";
 }
 
 export interface MatchRow {
@@ -102,7 +105,7 @@ export async function getTournamentBundle(slug: string): Promise<TournamentBundl
   if (!tournament) return null;
 
   const [participants, matches] = await Promise.all([
-    sb.from("participants").select("id, tournament_id, name, group_label, seed").eq("tournament_id", tournament.id).order("seed", { nullsFirst: false }),
+    sb.from("participants").select("id, tournament_id, name, group_label, seed, user_id, link_status").eq("tournament_id", tournament.id).order("seed", { nullsFirst: false }),
     sb
       .from("matches")
       .select("id, tournament_id, round, group_label, home_id, away_id, home_score, away_score, status, scheduled_at, next_match_id, next_slot")
