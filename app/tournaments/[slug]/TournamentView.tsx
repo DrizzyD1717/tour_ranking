@@ -1649,7 +1649,12 @@ export default function TournamentView({ initial, demo }: { initial: TournamentB
     intro.current = false;
   }, []);
 
-  // Live updates: when a scorekeeper saves a result, everyone's table moves.
+  // Set while the organizer is deleting from this page, so they aren't shown the "was deleted" notice.
+  const deleting = useRef(false);
+  const [deleted, setDeleted] = useState(false);
+
+  // Live updates: when a scorekeeper saves a result, everyone's table moves. Entrant changes, visibility,
+  // archiving and deletion arrive the same way.
   useEffect(() => {
     if (demo || !hasSupabase) return;
     const sb = getSupabase();
@@ -1670,11 +1675,34 @@ export default function TournamentView({ initial, demo }: { initial: TournamentB
       )
       .on(
         "postgres_changes",
-        { event: "UPDATE", schema: "public", table: "tournaments", filter: `id=eq.${tournament.id}` },
+        { event: "*", schema: "public", table: "tournaments", filter: `id=eq.${tournament.id}` },
         (payload) => {
-          const row = payload.new as { status?: Tournament["status"]; visibility?: Tournament["visibility"] };
+          if (payload.eventType === "DELETE") {
+            // The organizer deleting it from this page navigates away on its own; everyone else sees a notice.
+            if (!deleting.current) setDeleted(true);
+            return;
+          }
+          const row = payload.new as Partial<Tournament> & { finished_at?: string | null };
           if (row.status) setStatus(row.status);
           if (row.visibility) setVisibility(row.visibility);
+          if (row.archive_mode) setArchiveMode(row.archive_mode);
+          // finished_at is stamped by the database; null means it was reopened.
+          if ("finished_at" in row) setFinishedAt(row.finished_at ?? null);
+        },
+      )
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "participants", filter: `tournament_id=eq.${tournament.id}` },
+        (payload) => {
+          if (payload.eventType === "DELETE") {
+            const gone = payload.old as Partial<ParticipantRow>;
+            setParticipants((ps) => ps.filter((p) => p.id !== gone.id));
+          } else {
+            const row = payload.new as ParticipantRow;
+            setParticipants((ps) =>
+              ps.some((p) => p.id === row.id) ? ps.map((p) => (p.id === row.id ? { ...p, ...row } : p)) : [...ps, row],
+            );
+          }
         },
       )
       .subscribe();
@@ -1937,7 +1965,9 @@ export default function TournamentView({ initial, demo }: { initial: TournamentB
 
   /** Deletes the tournament and everything in it. Returns an error message, or null after leaving the page. */
   async function deleteTournament(): Promise<string | null> {
+    deleting.current = true;
     const { data, error } = await getSupabase().from("tournaments").delete().eq("id", tournament.id).select("id");
+    if (error || !data || data.length === 0) deleting.current = false;
     if (error) return error.message;
     if (!data || data.length === 0) return "Couldn't delete it. Only the organizer can do that.";
     router.push("/my-tournaments");
@@ -1958,6 +1988,24 @@ export default function TournamentView({ initial, demo }: { initial: TournamentB
   }
 
   const nothingLeft = !matches.some((m) => m.status !== "finished" && m.home_id && m.away_id);
+
+  if (deleted) {
+    return (
+      <main className="bg-floodlight min-h-[calc(100dvh-3.5rem)] px-4 py-16 sm:px-6 sm:py-24">
+        <div className="mx-auto max-w-xl">
+          <h1 className="font-display text-5xl font-extrabold leading-[0.95] tracking-tight sm:text-7xl">
+            This tournament was deleted
+          </h1>
+          <p role="status" className="mt-5 text-lg text-muted">
+            The organizer removed {tournament.name}. Its fixtures and scores are gone.
+          </p>
+          <Link href="/" className="mt-8 inline-flex rounded-full bg-primary px-6 py-3 font-semibold text-primary-foreground transition hover:shadow-glow-lime">
+            Back home
+          </Link>
+        </div>
+      </main>
+    );
+  }
 
   return (
     <MotionConfig reducedMotion="user">

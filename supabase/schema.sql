@@ -451,3 +451,18 @@ drop trigger if exists tournaments_finished_at on public.tournaments;
 create trigger tournaments_finished_at
   before insert or update on public.tournaments
   for each row execute function public.tournaments_finished_at();
+
+-- ============================================================================
+-- Realtime for entrants (same as supabase/009_realtime_participants.sql)
+-- ============================================================================
+-- Lets open tournament pages hear about entrant changes (renames, links, accepted invitations) live.
+-- Matches and tournaments were already broadcast; row-level security still decides who receives what.
+do $$
+begin
+  if not exists (
+    select 1 from pg_publication_tables
+    where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'participants'
+  ) then
+    alter publication supabase_realtime add table public.participants;
+  end if;
+end $$;
