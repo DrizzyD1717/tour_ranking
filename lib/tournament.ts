@@ -844,3 +844,23 @@ export function isArchived(
   const due = archiveDueAt(t);
   return due !== null && now >= due.getTime();
 }
+
+export const RECENT_DAYS = 7;
+
+/**
+ * Tournaments that left the home list on their own (auto-archived) within the last week, newest first.
+ * The home page shows them in a "Recently finished" strip so a tournament doesn't just vanish. One the
+ * organizer archived on purpose is not shown here.
+ */
+export function recentlyArchived<T extends { archived: boolean; archiveMode?: ArchiveMode; finishedAt?: string | null }>(
+  items: T[],
+  now: number = Date.now(),
+  limit = 6,
+): T[] {
+  const cutoff = now - RECENT_DAYS * 24 * 60 * 60 * 1000;
+  const at = (t: T) => (t.finishedAt ? new Date(t.finishedAt).getTime() : NaN);
+  return items
+    .filter((t) => t.archived && (t.archiveMode ?? "auto") === "auto" && at(t) >= cutoff)
+    .sort((a, b) => at(b) - at(a))
+    .slice(0, limit);
+}

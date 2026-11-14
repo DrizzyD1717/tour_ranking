@@ -4,6 +4,7 @@ import { useState } from "react";
 import Link from "next/link";
 import { motion } from "framer-motion";
 import type { TournamentSummary } from "@/lib/supabase";
+import { recentlyArchived } from "@/lib/tournament";
 import Crest from "./Crest";
 
 const FORMAT: Record<TournamentSummary["format"], string> = {
@@ -34,6 +35,7 @@ export default function TournamentBrowser({
   const [query, setQuery] = useState("");
   const [limit, setLimit] = useState(PAGE);
   const [showArchived, setShowArchived] = useState(false);
+  const recent = recentlyArchived(tournaments);
   const archivedCount = tournaments.filter((t) => t.archived).length;
 
   // Search covers the tournament name and the game; the chip counts follow the search.
@@ -98,6 +100,32 @@ export default function TournamentBrowser({
         </label>
       )}
       </div>
+
+      {!showArchived && !q && recent.length > 0 && (
+        <section aria-labelledby="recent-h" className="mb-8">
+          <h2 id="recent-h" className="mb-3 font-display text-2xl font-bold">
+            Recently finished
+          </h2>
+          <ul className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            {recent.map((t) => (
+              <li key={t.id}>
+                <Link
+                  href={`/tournaments/${t.slug}`}
+                  className="flex items-center gap-3 rounded-2xl border border-gold/30 bg-gold/[0.06] p-3 transition-colors hover:border-gold/60"
+                >
+                  <Crest name={t.game.name} size="sm" />
+                  <span className="min-w-0">
+                    <span className="block truncate font-display text-xl font-bold leading-tight">{t.name}</span>
+                    <span className="block truncate text-sm text-muted">
+                      {t.game.name} · finished {t.finishedAt ? new Date(t.finishedAt).toLocaleDateString([], { day: "numeric", month: "short" }) : ""}
+                    </span>
+                  </span>
+                </Link>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
 
       {shown.length === 0 ? (
         <p className="rounded-2xl border border-dashed border-border-strong px-6 py-12 text-center text-muted">

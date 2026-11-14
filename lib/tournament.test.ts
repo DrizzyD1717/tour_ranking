@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { recentlyArchived } from "./tournament";
 import {
   advanceKnockout,
   assignGroups,
@@ -856,5 +857,31 @@ describe("archiving", () => {
     const out = summarizeTournaments(rows, t0 + 25 * HOUR);
     expect(out.map((s) => [s.id, s.archived]).sort()).toEqual([["live", false], ["new", true], ["old", true]]);
     expect(summarizeTournaments([rows[0]], t0 + HOUR)[0].archived).toBe(false);
+  });
+});
+
+describe("recentlyArchived", () => {
+  const now = Date.parse("2026-11-14T12:00:00Z");
+  const day = 86400000;
+  const mk = (id: string, ago: number | null, over: Record<string, unknown> = {}) => ({
+    id,
+    archived: true,
+    archiveMode: "auto" as const,
+    finishedAt: ago === null ? null : new Date(now - ago * day).toISOString(),
+    ...over,
+  });
+  it("keeps auto-archived ones from the last week, newest first", () => {
+    const r = recentlyArchived([mk("old", 10), mk("a", 3), mk("b", 1)], now);
+    expect(r.map((t) => t.id)).toEqual(["b", "a"]);
+  });
+  it("skips live, manually archived and undated ones", () => {
+    const r = recentlyArchived(
+      [mk("live", 1, { archived: false }), mk("manual", 1, { archiveMode: "archived" }), mk("nodate", null), mk("ok", 2)],
+      now,
+    );
+    expect(r.map((t) => t.id)).toEqual(["ok"]);
+  });
+  it("respects the limit", () => {
+    expect(recentlyArchived([mk("1", 1), mk("2", 2), mk("3", 3)], now, 2)).toHaveLength(2);
   });
 });

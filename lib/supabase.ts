@@ -186,6 +186,8 @@ export interface TournamentSummary {
   visibility?: Tournament["visibility"];
   /** Left the home list (a day after finishing, or archived by the organizer). Still has its page and rankings. */
   archived: boolean;
+  archiveMode: ArchiveMode;
+  finishedAt: string | null;
   game: { name: string; slug: string; category: Game["category"] };
   /** Teams or players entered. */
   entrants: number;
@@ -222,6 +224,8 @@ export function summarizeTournaments(rows: SummaryRow[], now: number = Date.now(
         format: r.format,
         createdAt: r.created_at,
         visibility: r.visibility,
+        archiveMode: r.archive_mode ?? "auto",
+        finishedAt: r.finished_at ?? null,
         archived: isArchived({ archive_mode: r.archive_mode, status: r.status, finished_at: r.finished_at }, now),
         game: r.game as TournamentSummary["game"],
         entrants: r.participants?.[0]?.count ?? 0,
