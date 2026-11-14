@@ -14,9 +14,15 @@ const instrument = Instrument_Sans({
   variable: "--font-instrument",
 });
 
+const DESCRIPTION = "Run tournaments and follow the table, from FIFA nights to faculty games.";
+
 export const metadata: Metadata = {
+  // Set NEXT_PUBLIC_SITE_URL (e.g. https://matchday.vercel.app) so share previews use absolute links.
+  metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL || "http://localhost:3000"),
   title: { default: "Matchday", template: "%s | Matchday" },
-  description: "Run tournaments and follow the table, from FIFA nights to faculty games.",
+  description: DESCRIPTION,
+  openGraph: { siteName: "Matchday", type: "website", title: "Matchday", description: DESCRIPTION },
+  twitter: { card: "summary", title: "Matchday", description: DESCRIPTION },
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

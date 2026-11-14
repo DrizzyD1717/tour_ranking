@@ -20,7 +20,18 @@ const load = cache(async (slug: string) => {
 export async function generateMetadata({ params }: { params: Promise<{ slug: string }> }): Promise<Metadata> {
   const { slug } = await params;
   const bundle = await load(slug);
-  return { title: bundle ? bundle.tournament.name : "Tournament" };
+  if (!bundle) return { title: "Tournament" };
+  const t = bundle.tournament;
+  const title = t.name;
+  const description = `${t.game.name} ${t.status === "finished" ? "results" : "fixtures, live scores"} and table on Matchday.`;
+  return {
+    title,
+    description,
+    openGraph: { title, description, type: "website", url: `/tournaments/${slug}` },
+    twitter: { card: "summary", title, description },
+    // Only public tournaments belong in search results; link-only ones are shareable but not indexed.
+    ...(t.visibility === "public" ? {} : { robots: { index: false, follow: false } }),
+  };
 }
 
 export default function TournamentPage({ params }: { params: Promise<{ slug: string }> }) {
