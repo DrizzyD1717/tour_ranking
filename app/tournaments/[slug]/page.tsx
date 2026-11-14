@@ -28,7 +28,7 @@ export async function generateMetadata({ params }: { params: Promise<{ slug: str
     title,
     description,
     openGraph: { title, description, type: "website", url: `/tournaments/${slug}` },
-    twitter: { card: "summary", title, description },
+    twitter: { card: "summary_large_image", title, description },
     // Only public tournaments belong in search results; link-only ones are shareable but not indexed.
     ...(t.visibility === "public" ? {} : { robots: { index: false, follow: false } }),
   };
